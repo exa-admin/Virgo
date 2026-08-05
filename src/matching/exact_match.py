@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from mdm.utils import (
+from matching.utils import (
     _apply_exclusion,
     _dedupe_match_links,
     _empty_ids,

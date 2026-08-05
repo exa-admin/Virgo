@@ -19,8 +19,8 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from mdm.config import load_country_config  # noqa: E402
-from mdm.pipeline import run_all, run_country  # noqa: E402
+from matching.config import load_country_config  # noqa: E402
+from matching.pipeline import run_all, run_country  # noqa: E402
 
 # COMMAND ----------
 

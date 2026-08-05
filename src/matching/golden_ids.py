@@ -5,7 +5,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
-from mdm.config import SYNTHETIC_GOLDEN_ID_OFFSET
+from matching.config import SYNTHETIC_GOLDEN_ID_OFFSET
 
 def collect_record_match_rules(match_links_df: DataFrame) -> DataFrame:
     edge_rules = (

@@ -8,7 +8,8 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 
 ## Base code (do not reverse)
 
-- **Canonical engine:** Python **PySpark** under `src/mdm/`.
+- **Canonical engine:** Python **PySpark** under `src/matching/` (match phase).
+- **Future:** `src/merging/` for survivorship / merge (not present yet).
 - **Not base:** A Scala “improved” notebook existed as a simpler prototype. Do **not** rewrite the engine in Scala.
 - **Port later (Python):** match confidence score, dual-pass enriched vs original reporting, more aggressive cache-before-count patterns from the Scala notes.
 
@@ -28,8 +29,8 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 Public API:
 
 ```python
-from mdm.pipeline import run_country, run_all
-from mdm.config import load_country_config, CONFIG_JSON
+from matching.pipeline import run_country, run_all
+from matching.config import load_country_config, CONFIG_JSON
 ```
 
 ## Key tables
@@ -46,7 +47,7 @@ from mdm.config import load_country_config, CONFIG_JSON
 | `MDMMatchedResults` | Output with `golden_id`, `final_match_rule`, flags |
 | `mdmenrichedoperators` | External enrichment (not created by setup SQL) |
 
-Defaults live in `mdm.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.schema_informatica`.
+Defaults live in `matching.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.schema_informatica`.
 
 ## How to run (Databricks)
 
@@ -55,12 +56,12 @@ Defaults live in `mdm.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.schem
 3. Call:
 
 ```python
-from mdm.config import load_country_config
-from mdm.pipeline import run_country
+from matching.config import load_country_config
+from matching.pipeline import run_country
 
 run_country(spark, "MY", load_country_config("MY"))
 # or
-from mdm.pipeline import run_all
+from matching.pipeline import run_all
 run_all(spark)
 ```
 
@@ -74,6 +75,14 @@ run_all(spark)
 
 ## Package map
 
+Intended layout:
+
+- `src/matching/` — match pipeline (current)
+- `src/merging/` — survivorship / merge (future; not created yet)
+- `src/dq/` — data quality utilities
+
+### `src/matching/` — match engine
+
 | Module | Responsibility |
 |--------|----------------|
 | `config.py` | Constants, JSON loaders, `_runtime_cfg` |
@@ -86,6 +95,12 @@ run_all(spark)
 | `components.py` | `connected_components_native` |
 | `golden_ids.py` | Final golden IDs + match rule aggregate |
 | `pipeline.py` | Enrich, registry, exclusions, `run_country` / `run_all` |
+
+### `src/dq/` — data quality
+
+| Module | Responsibility |
+|--------|----------------|
+| `address_enrichment.py` | Google Places top-N address candidates for manual review |
 
 ## What is NOT built yet
 

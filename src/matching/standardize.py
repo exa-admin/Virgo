@@ -6,7 +6,7 @@ from typing import Any, Dict
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from mdm.utils import _clean_text, _compact_key, _standardize_address
+from matching.utils import _clean_text, _compact_key, _standardize_address
 
 def standardize_input(df: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
     std = cfg["standardization"]

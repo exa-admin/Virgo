@@ -8,24 +8,24 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from mdm.components import connected_components_native
-from mdm.config import (
+from matching.components import connected_components_native
+from matching.config import (
     CONFIG_JSON,
     ENRICHMENT_COLUMN_MAPPINGS,
     _runtime_cfg,
     load_all_country_configs,
 )
-from mdm.delta_io import (
+from matching.delta_io import (
     _clear_country_slice,
     _materialize_matching_state,
     _overwrite_delta_slice,
     _require_table,
     _require_table_columns,
 )
-from mdm.golden_ids import _build_final_golden_ids, collect_record_match_rules
-from mdm.match_pipeline import run_match_pipeline
-from mdm.standardize import standardize_input
-from mdm.utils import (
+from matching.golden_ids import _build_final_golden_ids, collect_record_match_rules
+from matching.match_pipeline import run_match_pipeline
+from matching.standardize import standardize_input
+from matching.utils import (
     _ensure_columns,
     _matched_record_ids_from_links,
     _require_dataframe_columns,

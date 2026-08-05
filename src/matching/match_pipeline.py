@@ -5,10 +5,10 @@ from typing import Any, Dict, Optional
 
 from pyspark.sql import DataFrame
 
-from mdm.delta_io import _materialize_matching_state, _materialize_rule_results
-from mdm.exact_match import run_exact_match
-from mdm.fuzzy_match import run_fuzzy_match
-from mdm.utils import (
+from matching.delta_io import _materialize_matching_state, _materialize_rule_results
+from matching.exact_match import run_exact_match
+from matching.fuzzy_match import run_fuzzy_match
+from matching.utils import (
     _dedupe_match_links,
     _empty_ids,
     _empty_match_links,

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The engine is a **batch, country-scoped** Spark job. It never uses Python UDFs or GraphFrames. Intermediate stewardship tables are materialised to Delta so each waterfall stage can restart from durable state and stewards can inspect rule evidence.
+The match engine lives in `src/matching/` as a **batch, country-scoped** Spark job. It never uses Python UDFs or GraphFrames. Intermediate stewardship tables are materialised to Delta so each waterfall stage can restart from durable state and stewards can inspect rule evidence. (A future `src/merging/` package will cover survivorship / merge.)
 
 ## Pipeline flowchart
 

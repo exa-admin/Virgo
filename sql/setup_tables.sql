@@ -1,7 +1,7 @@
 -- =============================================================================
 -- MDM Match engine — Delta table DDL
 -- =============================================================================
--- Schema placeholder matches Python defaults in mdm.config.DEFAULT_TARGET_SCHEMA.
+-- Schema placeholder matches Python defaults in matching.config.DEFAULT_TARGET_SCHEMA.
 -- Parameterize catalog/schema per environment before running, e.g.:
 --   REPLACE pds_auroradsar_prod.schema_informatica WITH <catalog>.<schema>
 --

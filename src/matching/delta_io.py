@@ -6,7 +6,7 @@ from typing import List, Optional
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from mdm.utils import _score_to_percentage_expr, _sql_literal
+from matching.utils import _score_to_percentage_expr, _sql_literal
 
 def _require_table(spark: SparkSession, table_name: str) -> None:
     if not spark.catalog.tableExists(table_name):

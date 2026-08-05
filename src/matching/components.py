@@ -7,7 +7,7 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from mdm.delta_io import _materialize_component_labels
+from matching.delta_io import _materialize_component_labels
 
 def connected_components_native(
     country_code: str,

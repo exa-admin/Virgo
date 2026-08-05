@@ -20,7 +20,9 @@ Details and a mermaid flowchart: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 | Path | Role |
 |------|------|
-| `src/mdm/` | Python package (match engine) |
+| `src/matching/` | Match pipeline package (current) |
+| `src/merging/` | Survivorship / merge (future; not present yet) |
+| `src/dq/` | Data quality utilities (e.g. address enrichment) |
 | `conf/countries/*.json` | Per-country match config (MY extracted) |
 | `sql/setup_tables.sql` | Delta DDL for MDM tables |
 | `notebooks/01_run_match_country.py` | Thin Databricks entry notebook |
@@ -50,8 +52,8 @@ import sys
 sys.path.append("/Workspace/Repos/Engine/src")  # adjust path
 
 from pyspark.sql import SparkSession
-from mdm.config import load_country_config
-from mdm.pipeline import run_country
+from matching.config import load_country_config
+from matching.pipeline import run_country
 
 spark = SparkSession.builder.getOrCreate()
 cfg = load_country_config("MY")
@@ -63,7 +65,7 @@ Or open `notebooks/01_run_match_country.py` and run all cells.
 ### All countries in conf/
 
 ```python
-from mdm.pipeline import run_all
+from matching.pipeline import run_all
 run_all(spark)  # loads conf/countries/*.json
 ```
 
@@ -79,7 +81,7 @@ Country JSON (e.g. `conf/countries/MY.json`) controls:
 - `exact_match_rules` / `fuzzy_match_rules` — priorities, methods, exclusions
 - `default_fuzzy_blocking` — named blocks referenced by fuzzy rules
 
-Table names default via `mdm.config._runtime_cfg` to  
+Table names default via `matching.config._runtime_cfg` to  
 `pds_auroradsar_prod.schema_informatica.*`.
 
 ## Conventions
