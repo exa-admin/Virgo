@@ -1,0 +1,14 @@
+---
+description: MDM Match engine conventions — read AGENTS.md first
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# MDM Engine
+
+This is a Databricks / Spark-native Customer MDM Match & Merge project.
+
+Before making substantial changes, read **AGENTS.md** at the repo root for pipeline overview, table roles, conventions (no UDFs, no GraphFrames, country-partitioned Delta), and what is intentionally out of scope.
+
+Base implementation language is **Python PySpark** under `src/mdm/`. Do not replace it with the Scala prototype notebook.

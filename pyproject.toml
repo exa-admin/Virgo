@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdm-engine"
+version = "0.1.0"
+description = "Databricks / Spark-native Customer MDM Match & Merge engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "MDM Engineering" }]
+# Runtime Spark/PySpark is provided by Databricks Runtime.
+# Local installs for editing/type-checking only:
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pyspark>=3.4.0",
+  "delta-spark>=2.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mdm = ["py.typed"]

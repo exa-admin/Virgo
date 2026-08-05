@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+secrets.json
+
+# Databricks
+.databricks/
+.databricks-connect*
+databricks-connect*
+
+# Spark / local junk
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+_SUCCESS
+_committed_*
+_started_*
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Testing / coverage / type check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Jupyter
+.ipynb_checkpoints/

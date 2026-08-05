@@ -1,0 +1,8 @@
+# Runtime Spark/PySpark is supplied by Databricks Runtime.
+# Install optional deps only for local editing / type-checking:
+#
+#   pip install -e ".[dev]"
+#
+# Or pin locally (versions vary by DBR):
+# pyspark>=3.4.0
+# delta-spark>=2.4.0
