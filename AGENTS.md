@@ -102,6 +102,33 @@ Intended layout:
 |--------|----------------|
 | `address_enrichment.py` | Google Places top-N address candidates for manual review |
 
+### Google Places API key (`GOOGLE_PLACES_API_KEY`)
+
+`src/dq/address_enrichment.py` reads the key from **`os.environ["GOOGLE_PLACES_API_KEY"]`** (or an explicit `api_key=` argument). Exact variable name: **`GOOGLE_PLACES_API_KEY`**.
+
+**Databricks (prefer secrets for production):**
+
+1. Create a secret scope and store the key, e.g. scope `mdm`, key `google-places-api-key`.
+2. In a notebook or job init, inject into the process env before calling enrichment:
+
+```python
+import os
+os.environ["GOOGLE_PLACES_API_KEY"] = dbutils.secrets.get(
+    scope="mdm", key="google-places-api-key"
+)
+```
+
+Alternatively, set `GOOGLE_PLACES_API_KEY` as a cluster / job environment variable (Spark env or job `spark_env_vars`). Prefer secrets over plain env vars in shared workspaces.
+
+**Local / dev:**
+
+```bash
+export GOOGLE_PLACES_API_KEY='your-key-here'
+# or put it in a .env file (already gitignored via .env / .env.*)
+```
+
+Do not commit secrets. `.gitignore` already covers `.env` and `.env.*`.
+
 ## What is NOT built yet
 
 - Merge / survivorship of golden attributes

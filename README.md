@@ -90,6 +90,49 @@ Table names default via `matching.config._runtime_cfg` to
 - No GraphFrames / GraphX — connected components use min-label propagation with Delta materialization
 - Country-partitioned Delta slices (`replaceWhere` / `DELETE … WHERE CountryCode = …`)
 
+## Address enrichment (Google Places)
+
+`src/dq/address_enrichment.py` calls the Google Places Text Search (New) API and returns a ranked candidate table for manual review. It requires env var **`GOOGLE_PLACES_API_KEY`** (or pass `api_key=` to the function).
+
+### Set the API key
+
+**Databricks (recommended for production — secret scope):**
+
+1. Store the key in a Databricks secret scope (create scope + put secret via CLI/UI).
+2. Inject into the process environment before calling enrichment:
+
+```python
+import os
+os.environ["GOOGLE_PLACES_API_KEY"] = dbutils.secrets.get(
+    scope="mdm",  # your scope name
+    key="google-places-api-key",  # your secret key name
+)
+```
+
+**Databricks (cluster / job env):** set `GOOGLE_PLACES_API_KEY` on the cluster environment, job `spark_env_vars`, or equivalent. Prefer secrets over plaintext env vars in shared workspaces.
+
+**Local / dev:**
+
+```bash
+export GOOGLE_PLACES_API_KEY='your-key-here'
+```
+
+Or put the same variable in a `.env` file loaded by your shell/tooling. Do **not** commit secrets — `.env` / `.env.*` are already in `.gitignore`.
+
+### Example
+
+```python
+from dq.address_enrichment import enrich_restaurant_candidates
+
+df = enrich_restaurant_candidates(
+    "McDonalds",
+    "Chineham, United Kingdom",
+    country_code="GB",
+    max_results=10,
+)
+display(df)  # Databricks notebook; locally print(df) is fine
+```
+
 ## Not built yet
 
 Merge/survivorship, incremental match, stewardship UI, XREF history, automated tests.

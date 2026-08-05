@@ -63,6 +63,10 @@ CANDIDATE_COLUMNS = [
 
 
 def _get_api_key(api_key: Optional[str] = None) -> str:
+    # Exact env var name: GOOGLE_PLACES_API_KEY.
+    # Databricks: set from a secret scope (preferred) or cluster/job env —
+    #   os.environ["GOOGLE_PLACES_API_KEY"] = dbutils.secrets.get(scope="…", key="…")
+    # Local/dev: export GOOGLE_PLACES_API_KEY='…' or put it in a gitignored .env
     key = api_key or os.environ.get("GOOGLE_PLACES_API_KEY")
     if not key:
         raise ValueError(
@@ -273,4 +277,8 @@ if __name__ == "__main__":
         country_code="GB",
         max_results=10,
     )
-    print(df.to_string(index=False))
+    # Databricks notebooks expose display(); fall back for local CLI
+    try:
+        display(df)
+    except NameError:
+        print(df.to_string(index=False))
