@@ -47,4 +47,4 @@ if run_mode == "all":
 else:
     cfg = load_country_config(country_code)
     result_df = run_country(spark, country_code, cfg)
-    display(result_df.limit(100))
+    display(result_df)
