@@ -1,6 +1,9 @@
 """MDM country/runtime configuration.
 
-Country match rules live under conf/countries/*.json.
+Country match rules live under conf/countries/{CC}.json.
+For a new country, copy conf/countries/template.json (reference only; not loaded)
+to conf/countries/{CC}.json and edit it.
+
 Table defaults target Databricks Unity Catalog / Hive metastore names
 used by the original notebook; override per environment as needed.
 """
@@ -10,237 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Embedded fallback: same MY config as conf/countries/MY.json (for notebook paste / offline).
-CONFIG_JSON = """
-{
-  "MY": {
-    "filter_condition": "CountryCode = 'MY'",
-    "EnrichDate": true,
-    "priorityMatching": true,
-    "invalid_values": [
-      "",
-      "null",
-      "nan",
-      "na",
-      "n/a",
-      "0",
-      "00",
-      "000",
-      "0000",
-      "dummy",
-      "test"
-    ],
-    "exclude_from_match_filters": [
-      "lower(OperatorName) LIKE '%invalid%'",
-      "lower(OperatorName) LIKE '%dummy%'",
-      "ZipCode IN ('00000', '99999')"
-    ],
-    "standardization": {
-      "name_column": "OperatorName",
-      "city_column": "CityText",
-      "state_column": "StateText",
-      "zip_column": "ZipCode",
-      "address_columns": [
-        "HouseNumberText",
-        "HouseNumberExtensionText",
-        "StreetText"
-      ]
-    },
-    "exact_match_rules": [
-      {
-        "rule_name": "Exact_OperatorName_Zip",
-        "priority": 10,
-        "columns": [
-          {
-            "column": "c_name_exact",
-            "method": "exact_not_empty",
-            "min_length": 3
-          },
-          {
-            "column": "c_zip_exact",
-            "method": "exact_not_empty",
-            "min_length": 3
-          }
-        ],
-        "match_exclusion_filter": [
-          "c_zip_exact IN ('00000', '99999')"
-        ]
-      },
-      {
-        "rule_name": "Exact_SAP_Customer_ID",
-        "priority": 20,
-        "columns": [
-          {
-            "column": "SAPCustomerID",
-            "method": "exact_not_empty",
-            "min_length": 3
-          }
-        ],
-        "match_exclusion_filter": [
-          "OTMText IN ('A++', 'DUMMY')"
-        ]
-      },
-      {
-        "rule_name": "Exact_Latitude_Longitude",
-        "priority": 30,
-        "columns": [
-          {
-            "column": "LatitudeText",
-            "method": "exact_raw_not_empty",
-            "min_length": 3
-          },
-          {
-            "column": "LongitudeText",
-            "method": "exact_raw_not_empty",
-            "min_length": 3
-          }
-        ]
-      }
-    ],
-    "default_fuzzy_blocking": [
-      {
-        "block_name": "zip_name_prefix",
-        "columns": [
-          "c_zip",
-          "c_name_prefix4"
-        ],
-        "max_block_size": 1000
-      },
-      {
-        "block_name": "city_name_soundex",
-        "columns": [
-          "c_city",
-          "c_name_soundex"
-        ],
-        "max_block_size": 300
-      },
-      {
-        "block_name": "city_name_prefix",
-        "columns": [
-          "c_city",
-          "c_name_prefix4"
-        ],
-        "max_block_size": 300
-      },
-      {
-        "block_name": "state_name_soundex",
-        "columns": [
-          "c_state",
-          "c_name_soundex"
-        ],
-        "max_block_size": 300
-      },
-      {
-        "block_name": "state_name_prefix",
-        "columns": [
-          "c_state",
-          "c_name_prefix4"
-        ],
-        "max_block_size": 300
-      }
-    ],
-    "fuzzy_match_rules": [
-      {
-        "rule_name": "Fuzzy_Name_Address_Zip",
-        "priority": 100,
-        "blocking_names": [
-          "zip_name_prefix",
-          "city_name_soundex",
-          "city_name_prefix"
-        ],
-        "conditions": [
-          {
-            "column": "c_name",
-            "method": "levenshtein_similarity",
-            "min": 0.86,
-            "min_length": 4
-          },
-          {
-            "column": "c_address",
-            "method": "levenshtein_or_token_jaccard",
-            "min": 0.7,
-            "min_length": 3,
-            "min_token_length": 2
-          },
-          {
-            "column": "c_zip",
-            "method": "exact_not_empty",
-            "min_length": 3
-          }
-        ],
-        "decision": "all",
-        "match_exclusion_filter": [
-          "c_address = 'test'"
-        ]
-      },
-      {
-        "rule_name": "Fuzzy_Name_Address_City",
-        "priority": 110,
-        "blocking_names": [
-          "city_name_soundex",
-          "city_name_prefix"
-        ],
-        "conditions": [
-          {
-            "column": "c_name",
-            "method": "levenshtein_similarity",
-            "min": 0.86,
-            "min_length": 4
-          },
-          {
-            "column": "c_address",
-            "method": "levenshtein_or_token_jaccard",
-            "min": 0.7,
-            "min_length": 3,
-            "min_token_length": 2
-          },
-          {
-            "column": "c_city",
-            "method": "exact_not_empty",
-            "min_length": 2
-          }
-        ],
-        "decision": "all",
-        "match_exclusion_filter": [
-          "c_address = 'test'"
-        ]
-      },
-      {
-        "rule_name": "Fuzzy_Name_Address_State",
-        "priority": 120,
-        "blocking_names": [
-          "state_name_soundex",
-          "state_name_prefix"
-        ],
-        "conditions": [
-          {
-            "column": "c_name",
-            "method": "levenshtein_similarity",
-            "min": 0.86,
-            "min_length": 4
-          },
-          {
-            "column": "c_address",
-            "method": "levenshtein_or_token_jaccard",
-            "min": 0.7,
-            "min_length": 3,
-            "min_token_length": 2
-          },
-          {
-            "column": "c_state",
-            "method": "exact_not_empty",
-            "min_length": 2
-          }
-        ],
-        "decision": "all",
-        "match_exclusion_filter": [
-          "c_address = 'test'"
-        ]
-      }
-    ]
-  }
-}
-"""
+# Reference shape for new countries: conf/countries/template.json (not loaded at runtime).
 
 DEFAULT_SOURCE_TABLE = "sources_informatica.ufsoperator"
 DEFAULT_TARGET_SCHEMA = "pds_auroradsar_prod.schema_informatica"
@@ -264,28 +37,52 @@ ENRICHMENT_COLUMN_MAPPINGS = [
 _CONF_DIR = Path(__file__).resolve().parents[2] / "conf" / "countries"
 
 
+def _is_country_config_file(path: Path) -> bool:
+    """True if path is a loadable country config (skips template.json and _*.json)."""
+    stem = path.stem
+    if stem.startswith("_"):
+        return False
+    if stem.lower() == "template":
+        return False
+    return path.suffix.lower() == ".json"
+
+
 def load_country_config(country_code: str, conf_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Load a single country config from conf/countries/{CC}.json, else CONFIG_JSON fallback."""
+    """Load conf/countries/{CC}.json. Raises FileNotFoundError if missing."""
     directory = conf_dir or _CONF_DIR
-    path = directory / f"{country_code.upper()}.json"
-    if path.is_file():
-        return json.loads(path.read_text())
-    all_cfg = json.loads(CONFIG_JSON)
-    if country_code.upper() not in all_cfg and country_code not in all_cfg:
-        raise KeyError(f"No config for country {country_code!r} in {path} or embedded CONFIG_JSON")
-    return all_cfg.get(country_code.upper()) or all_cfg[country_code]
+    cc = country_code.upper()
+    path = directory / f"{cc}.json"
+    if not _is_country_config_file(path) or not path.is_file():
+        raise FileNotFoundError(
+            f"Missing country config: {path}. "
+            f"Copy conf/countries/template.json to conf/countries/{cc}.json and edit it."
+        )
+    return json.loads(path.read_text())
 
 
 def load_all_country_configs(conf_dir: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
-    """Load all conf/countries/*.json files; fall back to embedded CONFIG_JSON if none found."""
+    """Load all conf/countries/*.json files except template.json and _*.json.
+
+    Raises FileNotFoundError if the directory is missing or contains no country configs.
+    """
     directory = conf_dir or _CONF_DIR
+    if not directory.is_dir():
+        raise FileNotFoundError(
+            f"Country config directory not found: {directory}. "
+            "Add conf/countries/{CC}.json files (copy from template.json)."
+        )
     configs: Dict[str, Dict[str, Any]] = {}
-    if directory.is_dir():
-        for path in sorted(directory.glob("*.json")):
-            configs[path.stem.upper()] = json.loads(path.read_text())
-    if configs:
-        return configs
-    return {k.upper(): v for k, v in json.loads(CONFIG_JSON).items()}
+    for path in sorted(directory.glob("*.json")):
+        if not _is_country_config_file(path):
+            continue
+        configs[path.stem.upper()] = json.loads(path.read_text())
+    if not configs:
+        raise FileNotFoundError(
+            f"No country configs found in {directory}. "
+            "Add conf/countries/{CC}.json files (copy from template.json; "
+            "template.json and _*.json are skipped)."
+        )
+    return configs
 
 
 def _runtime_cfg(country_code: str, cfg: Dict[str, Any]) -> Dict[str, Any]:

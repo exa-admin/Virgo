@@ -10,7 +10,6 @@ from pyspark.sql import functions as F
 
 from matching.components import connected_components_native
 from matching.config import (
-    CONFIG_JSON,
     ENRICHMENT_COLUMN_MAPPINGS,
     _runtime_cfg,
     load_all_country_configs,
@@ -433,8 +432,9 @@ def run_all(
 ) -> None:
     """Run match for every country in config_json or conf/countries/*.json.
 
-    If config_json is None, loads conf/countries/*.json (with embedded CONFIG_JSON fallback).
-    If config_json is provided (including the default CONFIG_JSON string), parses that JSON.
+    If config_json is None, loads conf/countries/{CC}.json via load_all_country_configs
+    (skips template.json / _*.json; raises if none found).
+    If config_json is provided, parses that multi-country JSON object instead.
     """
     if config_json is None:
         configs = load_all_country_configs(conf_dir)

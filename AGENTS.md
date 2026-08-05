@@ -30,7 +30,7 @@ Public API:
 
 ```python
 from matching.pipeline import run_country, run_all
-from matching.config import load_country_config, CONFIG_JSON
+from matching.config import load_country_config
 ```
 
 ## Key tables
@@ -71,7 +71,7 @@ run_all(spark)
 - Prefer **no GraphFrames / GraphX**.
 - Writes are **country-partitioned Delta slices** (`replaceWhere` / delete-by-country).
 - Match methods are Spark-native (exact keys, Levenshtein, token Jaccard, blocking).
-- Keep config in `conf/countries/*.json`; `CONFIG_JSON` remains as embedded fallback.
+- Keep config in `conf/countries/{CC}.json` (required; no embedded fallback). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded.
 
 ## Package map
 
@@ -142,7 +142,7 @@ Do not commit secrets. `.gitignore` already covers `.env` and `.env.*`.
 
 - Preserve match semantics (priorities, exclusions, block size caps, synthetic offset `100000000`).
 - Prefer small, focused changes; do not “simplify away” stewardship tables or waterfall.
-- When adding countries, add `conf/countries/<CC>.json` rather than hardcoding rules in Python.
+- When adding countries, copy `conf/countries/template.json` → `conf/countries/<CC>.json` and edit; do not hardcode rules in Python. `template.json` / `_*.json` are never loaded as countries.
 - Identity column DDL for `MDMRowId` may need env-specific adjustment — see comments in `sql/setup_tables.sql`.
 
 ## Pointers

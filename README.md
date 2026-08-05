@@ -23,7 +23,8 @@ Details and a mermaid flowchart: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | `src/matching/` | Match pipeline package (current) |
 | `src/merging/` | Survivorship / merge (future; not present yet) |
 | `src/dq/` | Data quality utilities (e.g. address enrichment) |
-| `conf/countries/*.json` | Per-country match config (MY extracted) |
+| `conf/countries/{CC}.json` | Per-country match config (required; e.g. `MY.json`) |
+| `conf/countries/template.json` | Reference-only shape for new countries (not loaded) |
 | `sql/setup_tables.sql` | Delta DDL for MDM tables |
 | `notebooks/01_run_match_country.py` | Thin Databricks entry notebook |
 | `AGENTS.md` | Instructions for AI/coding sessions |
@@ -70,6 +71,8 @@ run_all(spark)  # loads conf/countries/*.json
 ```
 
 ## Configuration overview
+
+Each country **must** have `conf/countries/{CC}.json`. Loaders raise `FileNotFoundError` if it is missing (no embedded fallback). To add a country, copy `conf/countries/template.json` → e.g. `SG.json` and edit — `template.json` and `_*.json` are skipped by `load_all_country_configs`.
 
 Country JSON (e.g. `conf/countries/MY.json`) controls:
 

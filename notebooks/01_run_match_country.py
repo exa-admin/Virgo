@@ -5,6 +5,8 @@
 # MAGIC Thin entrypoint. Ensures `src/` is importable, then calls `run_country` or `run_all`.
 # MAGIC
 # MAGIC Prerequisites: run `sql/setup_tables.sql` once per environment.
+# MAGIC Requires `conf/countries/{CC}.json` (e.g. `MY.json`). Missing files raise — there is no embedded fallback.
+# MAGIC To add a country, copy `conf/countries/template.json` and edit.
 
 # COMMAND ----------
 
