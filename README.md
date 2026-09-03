@@ -10,24 +10,42 @@ This repository holds the **Python PySpark** match pipeline that assigns stable 
 
 ```
 Source → (optional enrichment) → Row registry → Standardize → Exclusions
-  → Exact/Fuzzy waterfall → Match links → Connected components
-  → Golden IDs (Informatica id > prior engine id > mint) → MDMMatchedResults
+  → Exact/Fuzzy waterfall → + Informatica group links (hard) → Match links
+  → Connected components (→ drop Informatica-group bridges)
+  → Golden IDs (Informatica id > prior engine id > mint ≥ 1e8) → MDMMatchedResults
 ```
 
 Details and a mermaid flowchart: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Golden ID continuity (Informatica migration)
 
-Informatica MDM is being replaced country by country, so golden ids must survive the switch:
+Informatica MDM is being replaced country by country. Policy: **existing Informatica groupings
+keep their golden id; only genuinely new clusters get a new id.**
 
-- A component that contains records with an Informatica `GoldenRecordId` **reuses it** (earliest first).
-- Otherwise the component keeps the id the engine assigned on a previous run (stored in `MDMRowRegistry.MDMGoldenId`).
-- Otherwise a new BIGINT id is minted from `MDMGoldenIdSequence`: always `>= golden_id_floor` (default `1000000000`, per country config — use the same value everywhere) and greater than every id already known, so it can never collide with Informatica.
-- Known Informatica ids are never overwritten with NULL once Informatica stops feeding a migrated country.
-- Every old → new remap (cluster merges/splits) is appended to `MDMGoldenIdHistory`; per-record detail is in `MDMMatchedResults` (`previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `golden_id_source`).
+- **Informatica groups are hard links.** Records already grouped under one `GoldenRecordId` are
+  linked by the engine (`match_rule = Source_GoldenRecordId`) before connected components, so a
+  group can never be split and always keeps its id — even for records excluded from new matching
+  (`preserve_source_golden_groups: true`).
+- A **new record** (no Informatica id) that matches a group member **inherits the group's id**.
+- A **brand-new cluster** is minted a BIGINT id from `MDMGoldenIdSequence`: always
+  `>= golden_id_floor` and greater than every id already known. `golden_id_floor` is
+  **`100000000` (1e8)**: Informatica is at ~1e7 (max `9999993` in Sep 2026) and still grows
+  slowly for non-migrated countries; 1e8 gives 10x headroom with 9-digit ids. Use the same value
+  in every country config and only ever raise it (the run fails if Informatica reaches the floor).
+- **Two Informatica groups bridged by engine rules**: with `allow_source_golden_group_merge:
+  false` (MY default) the bridging edges are dropped and recorded in `MDMRuleResults` stage
+  `999_Blocked_Source_GoldenRecordId_Merge` for stewardship — no Informatica id ever changes.
+  With `true`, one id survives and the other is logged as `MERGE` in `MDMGoldenIdHistory`.
+- Otherwise a cluster keeps the id the engine assigned on a previous run (`MDMRowRegistry.MDMGoldenId`).
+- Known Informatica ids are never overwritten with NULL once Informatica stops feeding a migrated
+  country; a non-numeric `GoldenRecordId` string fails the run instead of silently becoming NULL.
+- The run fails fast (before any write-back) if an Informatica id would end up split across
+  components, on an engine-minted id, or — when merges are disallowed — changed at all.
+- Every old → new remap is appended to `MDMGoldenIdHistory`; per-record detail is in
+  `MDMMatchedResults` (`previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `golden_id_source`).
 
 Full policy, tie-breaking and safety checks: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#golden-ids-informatica-continuity).
-Existing deployments: run the `ALTER TABLE MDMRowRegistry ADD COLUMNS …` and new `CREATE TABLE` statements in `sql/setup_tables.sql`.
+Existing deployments: run the `ALTER TABLE … ADD COLUMNS …` and new `CREATE TABLE` statements in `sql/setup_tables.sql`.
 
 ## Repository layout
 
@@ -92,7 +110,9 @@ Country JSON (e.g. `conf/countries/MY.json`) controls:
 - `filter_condition` — source filter (`CountryCode = 'MY'`)
 - `EnrichDate` — join Google Places / enriched operators when true
 - `priorityMatching` — waterfall (already-matched records leave later rules as subjects only)
-- `golden_id_floor` — lower bound for engine-minted golden ids (keep identical across countries)
+- `golden_id_floor` — lower bound for engine-minted golden ids (`100000000`; keep identical across countries, only ever raise)
+- `preserve_source_golden_groups` — hard-link Informatica groupings so they never split or change id (default `true`)
+- `allow_source_golden_group_merge` — let engine rules merge two Informatica groups (`false` for MY: bridging edges are dropped and recorded)
 - `components_max_iterations` — connected-components iteration budget (run fails if not converged)
 - `invalid_values`, `exclude_from_match_filters`
 - `standardization` — name/city/state/zip/address columns

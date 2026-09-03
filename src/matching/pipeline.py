@@ -12,12 +12,15 @@ from pyspark.sql import functions as F
 from matching.components import connected_components_native
 from matching.config import (
     ENRICHMENT_COLUMN_MAPPINGS,
+    SOURCE_GOLDEN_GROUP_RULE_NAME,
+    SOURCE_GOLDEN_GROUP_RULE_STAGE,
     _runtime_cfg,
     load_all_country_configs,
 )
 from matching.delta_io import (
     _clear_country_slice,
     _materialize_matching_state,
+    _materialize_rule_results,
     _overwrite_delta_slice,
     _require_table,
     _require_table_columns,
@@ -32,10 +35,20 @@ from matching.golden_ids import (
     collect_record_match_rules,
     persist_golden_id_assignments,
     validate_golden_id_space,
+    validate_source_golden_group_assignments,
 )
 from matching.match_pipeline import run_match_pipeline
+from matching.source_golden_groups import (
+    build_source_golden_group_links,
+    materialize_blocked_source_group_links,
+    remove_links,
+    resolve_transitive_source_group_bridges,
+    source_golden_group_blocking_enabled,
+    split_direct_source_group_bridges,
+)
 from matching.standardize import standardize_input
 from matching.utils import (
+    _dedupe_match_links,
     _ensure_columns,
     _is_empty,
     _matched_record_ids_from_links,
@@ -60,6 +73,31 @@ ROW_REGISTRY_REQUIRED_COLUMNS = [
     "DateUpdated",
 ]
 
+_NUMERIC_ID_PATTERN = r"^[0-9]+$"
+
+
+def _source_golden_id_as_long(golden_record_id: F.Column) -> F.Column:
+    """Informatica GoldenRecordId arrives as a numeric STRING; trim and cast, blanks -> NULL."""
+    trimmed = F.trim(golden_record_id.cast("string"))
+    return F.when(trimmed.rlike(_NUMERIC_ID_PATTERN), trimmed.cast("long")).otherwise(F.lit(None).cast("long"))
+
+
+def _validate_source_golden_ids_numeric(source: DataFrame) -> None:
+    """Fail fast if a non-blank GoldenRecordId is not a plain integer string.
+
+    A silent cast would turn such values into NULL and the record would lose its
+    Informatica grouping (and could be minted a new engine id).
+    """
+    trimmed = F.trim(F.col("GoldenRecordId").cast("string"))
+    invalid = source.filter(trimmed.isNotNull() & (trimmed != F.lit("")) & ~trimmed.rlike(_NUMERIC_ID_PATTERN))
+    if not _is_empty(invalid):
+        sample = [r["GoldenRecordId"] for r in invalid.select("GoldenRecordId").limit(5).collect()]
+        raise ValueError(
+            f"Source GoldenRecordId contains non-numeric values (sample: {sample}). Informatica golden ids must be "
+            "integer strings; fix the source or clean the values before running the match."
+        )
+
+
 def _ensure_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
     """MERGE source keys into MDMRowRegistry and attach MDMRowId + golden id context.
 
@@ -76,6 +114,7 @@ def _ensure_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
     _require_table_columns(spark, row_registry_table, ROW_REGISTRY_REQUIRED_COLUMNS)
 
     _require_dataframe_columns(source, [row_registry_key_column, "CountryCode", "GoldenRecordId", "BDLLoadTimestamp"], "Source DataFrame")
+    _validate_source_golden_ids_numeric(source)
 
     # Deterministic one-row-per-key: prefer a row that carries an Informatica id, then the
     # earliest load timestamp, then the smallest id (dropDuplicates would pick arbitrarily).
@@ -87,7 +126,7 @@ def _ensure_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
         source.select(
             F.trim(F.coalesce(F.col("CountryCode").cast("string"), F.lit(""))).alias("CountryCode"),
             F.trim(F.coalesce(F.col(row_registry_key_column).cast("string"), F.lit(""))).alias("OperatorConcatId"),
-            F.col("GoldenRecordId").cast("long").alias("SourceGoldenRecordId"),
+            _source_golden_id_as_long(F.col("GoldenRecordId")).alias("SourceGoldenRecordId"),
             F.col("BDLLoadTimestamp").cast("timestamp").alias("GoldenIDCreatedDate"),
         )
         .filter(F.col("CountryCode") != "")
@@ -354,11 +393,40 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
         matchable = processed.join(excluded_ids.select("record_id"), "record_id", "left_anti").persist(StorageLevel.MEMORY_AND_DISK)
         matchable.count()
 
-    all_match_links = run_match_pipeline(matchable, country_code, cfg)
+    engine_match_links = run_match_pipeline(matchable, country_code, cfg)
 
-    with timed(f"Country {country_code}: materialize match links"):
-        all_match_links = _overwrite_delta_slice(
-            all_match_links.select(
+    preserve_source_groups = bool(cfg.get("preserve_source_golden_groups", True))
+    block_source_group_merges = source_golden_group_blocking_enabled(cfg)
+    blocked_links = None
+    if preserve_source_groups:
+        with timed(f"Country {country_code}: source golden group links"):
+            # Built from the FULL processed population: Informatica groupings also hold for
+            # records excluded from new matching. These edges sit outside the priority
+            # waterfall (they do not change which rule other records match on) but are
+            # part of the match graph, so they show up in final_match_rule.
+            source_group_links = build_source_golden_group_links(processed)
+            materialized_source_links = _materialize_rule_results(
+                source_group_links,
+                processed,
+                cfg["rowRegistryKeyColumn"],
+                cfg["ruleResultsTable"],
+                country_code,
+                "source_golden",
+                SOURCE_GOLDEN_GROUP_RULE_STAGE,
+                0,
+            )
+            print(f"  -> Materialized {materialized_source_links.count()} Source_GoldenRecordId links")
+            if block_source_group_merges:
+                engine_match_links, blocked_links = split_direct_source_group_bridges(engine_match_links, processed)
+                blocked_links = blocked_links.persist(StorageLevel.MEMORY_AND_DISK)
+                print(f"  -> Blocked {blocked_links.count()} engine links that directly bridge two Informatica groups")
+            all_match_links = _dedupe_match_links(engine_match_links.unionByName(source_group_links))
+    else:
+        all_match_links = engine_match_links
+
+    def _materialize_match_links(links: DataFrame) -> DataFrame:
+        return _overwrite_delta_slice(
+            links.select(
                 F.lit(country_code).alias("CountryCode"),
                 "src",
                 "dst",
@@ -383,13 +451,11 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
             "src_is_rule_subject",
             "dst_is_rule_subject",
         ).persist(StorageLevel.MEMORY_AND_DISK)
+
+    with timed(f"Country {country_code}: materialize match links"):
+        all_match_links = _materialize_match_links(all_match_links)
         link_count = all_match_links.count()
         print(f"  -> Total match links: {link_count}")
-
-    match_links_temp_view = cfg.get("matchLinksTempView") or cfg.get("edges_temp_view")
-    if match_links_temp_view:
-        all_match_links.createOrReplaceTempView(match_links_temp_view)
-        print(f"Created temporary match link evidence view: {match_links_temp_view}")
 
     with timed(f"Country {country_code}: connected components"):
         matched_record_ids_for_grouping = _materialize_matching_state(
@@ -406,10 +472,37 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
             cfg,
         )
 
+    if block_source_group_merges:
+        with timed(f"Country {country_code}: resolve transitive Informatica group bridges"):
+            resolution = resolve_transitive_source_group_bridges(country_code, components, all_match_links, processed, cfg)
+            if resolution is not None:
+                transitive_blocked, resolved_components = resolution
+                print(f"  -> Blocked {transitive_blocked.count()} engine links that transitively bridge Informatica groups")
+                blocked_links = blocked_links.unionByName(transitive_blocked).persist(StorageLevel.MEMORY_AND_DISK)
+                blocked_links.count()
+                transitive_blocked.unpersist()
+                # The final graph must not contain the dropped edges: rewrite MDMMatchLinks.
+                reduced_links = remove_links(all_match_links, blocked_links)
+                all_match_links.unpersist()
+                all_match_links = _materialize_match_links(reduced_links)
+                print(f"  -> Total match links after resolution: {all_match_links.count()}")
+                components.unpersist()
+                components = resolved_components
+            blocked_count = materialize_blocked_source_group_links(blocked_links, processed, cfg, country_code)
+            print(f"  -> Blocked Informatica group bridges recorded in {cfg['ruleResultsTable']}: {blocked_count}")
+
+    match_links_temp_view = cfg.get("matchLinksTempView") or cfg.get("edges_temp_view")
+    if match_links_temp_view:
+        all_match_links.createOrReplaceTempView(match_links_temp_view)
+        print(f"Created temporary match link evidence view: {match_links_temp_view}")
+
     with timed(f"Country {country_code}: golden ids"):
         record_rules = collect_record_match_rules(all_match_links)
         # Persisted inside; one row per distinct record_id with golden_id / source / is_new.
         final_golden_ids = _build_final_golden_ids(processed, components, cfg)
+        # Migration guarantee: no Informatica group split / re-minted / renamed. Raises before
+        # anything is written back.
+        validate_source_golden_group_assignments(final_golden_ids, processed, cfg, country_code)
         # Registry first: if the results write fails afterwards, a re-run reuses these ids
         # (tier 2) instead of minting again.
         persist_golden_id_assignments(final_golden_ids, cfg, country_code)
@@ -425,15 +518,25 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
             .join(match_group_sizes, "golden_id", "left")
             .withColumn("match_group_size", F.coalesce(F.col("match_group_size"), F.lit(1)))
             .withColumn("is_excluded_from_match", F.coalesce(F.col("is_excluded_from_match"), F.lit(False)))
+            # Excluded records never take part in engine rules, so the only link they can
+            # carry is Source_GoldenRecordId: they stay in their Informatica group and are
+            # labelled accordingly instead of plain "Excluded from Match".
             .withColumn(
                 "final_match_rule",
-                F.when(F.col("is_excluded_from_match") == F.lit(True), F.lit("Excluded from Match"))
+                F.when(
+                    F.col("is_excluded_from_match") & F.col("final_match_rule").isNull(),
+                    F.lit("Excluded from Match"),
+                )
+                .when(
+                    F.col("is_excluded_from_match"),
+                    F.concat(F.lit("Excluded from Match, "), F.col("final_match_rule")),
+                )
                 .otherwise(F.coalesce(F.col("final_match_rule"), F.lit("Self/No Match"))),
             )
             .withColumn(
                 "is_matched",
                 F.when(
-                    F.col("is_excluded_from_match"),
+                    F.col("is_excluded_from_match") & ~F.col("final_match_rule").contains(SOURCE_GOLDEN_GROUP_RULE_NAME),
                     F.lit(False),
                 ).otherwise(F.col("match_group_size") > F.lit(1)),
             )
@@ -473,6 +576,8 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
     components.unpersist()
     matched_record_ids_for_grouping.unpersist()
     all_match_links.unpersist()
+    if blocked_links is not None:
+        blocked_links.unpersist()
     excluded_ids.unpersist()
     processed.unpersist()
     matchable.unpersist()

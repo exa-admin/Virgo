@@ -2,7 +2,9 @@
   "filter_condition": "CountryCode = 'MY'",
   "EnrichDate": true,
   "priorityMatching": true,
-  "golden_id_floor": 1000000000,
+  "golden_id_floor": 100000000,
+  "preserve_source_golden_groups": true,
+  "allow_source_golden_group_merge": false,
   "components_max_iterations": 30,
   "invalid_values": [
     "",

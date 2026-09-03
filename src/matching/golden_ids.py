@@ -20,6 +20,12 @@ Golden id selection per connected component ("cluster", keyed by TempClusterId):
 Every rule is deterministic, so re-running on unchanged data yields identical ids.
 Transitions (old id -> new id) are appended to ``MDMGoldenIdHistory`` and the chosen
 ids are written back to ``MDMRowRegistry`` so the next run prefers them (tier 2).
+
+With ``preserve_source_golden_groups`` (default) the records of an Informatica group are
+hard-linked before components (``source_golden_groups.py``), so step 2 never has to
+arbitrate an Informatica id between components: a SPLIT of an Informatica id is impossible
+and ``validate_source_golden_group_assignments`` fails the run if it ever happens. A MERGE
+of two Informatica ids only occurs when ``allow_source_golden_group_merge`` is true.
 """
 from __future__ import annotations
 
@@ -311,6 +317,61 @@ def _build_final_golden_ids(processed_df: DataFrame, cluster_labels_df: DataFram
     chosen.unpersist()
     new_clusters.unpersist()
     return result
+
+
+def validate_source_golden_group_assignments(
+    final_golden_ids_df: DataFrame,
+    processed_df: DataFrame,
+    cfg: Dict[str, Any],
+    country_code: str,
+) -> None:
+    """Fail fast if an Informatica grouping was split, re-minted or (optionally) renamed.
+
+    Only active with ``preserve_source_golden_groups``. For every non-null
+    ``SourceGoldenRecordId`` in the country:
+
+    - all its records must sit in exactly one component (no SPLIT of an Informatica group);
+    - that component's golden id must be Informatica-sourced (never an engine-minted id);
+    - unless ``allow_source_golden_group_merge`` is true, the golden id must equal the
+      Informatica id itself (no id change at all, not even by merging two groups).
+
+    Called before anything is written back to the registry, so a violation leaves no trace.
+    """
+    if not bool(cfg.get("preserve_source_golden_groups", True)):
+        return
+    allow_merge = bool(cfg.get("allow_source_golden_group_merge", False))
+
+    rows = (
+        processed_df.select(
+            F.col("record_id").cast("long").alias("record_id"),
+            F.col("SourceGoldenRecordId").cast("long").alias("SourceGoldenRecordId"),
+        )
+        .filter(F.col("SourceGoldenRecordId").isNotNull())
+        .dropDuplicates(["record_id"])
+        .join(final_golden_ids_df.select("record_id", "TempClusterId", "golden_id", "golden_id_source"), "record_id", "inner")
+    )
+    per_id = rows.groupBy("SourceGoldenRecordId").agg(
+        F.countDistinct("TempClusterId").alias("component_count"),
+        F.countDistinct("golden_id").alias("golden_id_count"),
+        F.min("golden_id").alias("golden_id"),
+        F.sum(F.when(F.col("golden_id_source") != F.lit(GOLDEN_ID_SOURCE_INFORMATICA), F.lit(1)).otherwise(F.lit(0))).alias(
+            "engine_sourced_records"
+        ),
+    )
+    violation = (F.col("component_count") > F.lit(1)) | (F.col("engine_sourced_records") > F.lit(0))
+    if not allow_merge:
+        violation = violation | (F.col("golden_id_count") > F.lit(1)) | (F.col("golden_id") != F.col("SourceGoldenRecordId"))
+    violations = per_id.filter(violation)
+    if not _is_empty(violations):
+        sample = [r.asDict() for r in violations.limit(5).collect()]
+        raise RuntimeError(
+            f"Informatica golden groupings for {country_code} would not be preserved (sample: {sample}). "
+            "With preserve_source_golden_groups every SourceGoldenRecordId must map to exactly one component whose "
+            "golden id is Informatica-sourced"
+            + ("" if allow_merge else " and equal to the SourceGoldenRecordId itself")
+            + ". No golden ids were written to MDMRowRegistry / MDMMatchedResults; inspect MDMMatchLinks / "
+            "MDMComponentLabels for this country."
+        )
 
 
 def persist_golden_id_assignments(final_golden_ids_df: DataFrame, cfg: Dict[str, Any], country_code: str) -> None:

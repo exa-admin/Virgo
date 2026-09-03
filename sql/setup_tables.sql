@@ -17,7 +17,10 @@ CREATE SCHEMA IF NOT EXISTS pds_auroradsar_prod.schema_informatica;
 -- golden id crosswalk used for Informatica -> engine continuity:
 --   SourceGoldenRecordId     last NON-NULL Informatica GoldenRecordId seen for the
 --                            row (never downgraded to NULL once Informatica stops
---                            populating it for a migrated country)
+--                            populating it for a migrated country). The source column
+--                            is a numeric STRING; the engine fails the run if a
+--                            non-blank value is not an integer string, so no id is
+--                            silently lost in the BIGINT cast.
 --   MDMGoldenId              golden id the engine assigned on its last run
 --   MDMGoldenIdSource        'INFORMATICA' (reused Informatica id) | 'ENGINE' (minted)
 --   MDMGoldenIdAssignedDate  when MDMGoldenId last changed (tie-breaker for reuse)
@@ -70,8 +73,11 @@ COMMENT 'Stable MDM row keys per country / OperatorConcatId + golden id crosswal
 -- MDMGoldenIdSequence — high-water mark for engine-minted golden ids
 -- One global row (SequenceName = 'MDMGoldenId'); ids are a single space across
 -- countries. The engine reserves ranges with a conditional MERGE and reads back.
--- Seed the row at or above the configured golden_id_floor (default 1000000000);
--- the engine also raises the base above max(SourceGoldenRecordId) automatically.
+-- Seed the row at or above the configured golden_id_floor (default 100000000 = 1e8;
+-- Informatica GoldenRecordId is ~1e7 and grows slowly); the engine also raises the
+-- base above max(SourceGoldenRecordId) / max(MDMGoldenId) automatically. Because the
+-- allocator takes max(floor, NextValue, ...), an existing higher NextValue is never
+-- lowered — the floor may only ever be raised.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMGoldenIdSequence (
   SequenceName   STRING     NOT NULL,
@@ -82,7 +88,7 @@ COMMENT 'Golden id allocator high-water mark (next unassigned value)';
 
 -- Idempotent seed (optional: the engine inserts the row itself on first allocation).
 MERGE INTO pds_auroradsar_prod.schema_informatica.MDMGoldenIdSequence AS t
-USING (SELECT 'MDMGoldenId' AS SequenceName, CAST(1000000000 AS BIGINT) AS NextValue) AS s
+USING (SELECT 'MDMGoldenId' AS SequenceName, CAST(100000000 AS BIGINT) AS NextValue) AS s
 ON t.SequenceName = s.SequenceName
 WHEN NOT MATCHED THEN INSERT (SequenceName, NextValue, DateUpdated)
 VALUES (s.SequenceName, s.NextValue, current_timestamp());
@@ -106,25 +112,44 @@ COMMENT 'Golden id remaps (old -> new) for downstream crosswalks';
 
 -- -----------------------------------------------------------------------------
 -- MDMRuleResults — per-rule match links (stewardship / audit)
+-- Stages written by the engine:
+--   000_Source_GoldenRecordId   RuleType 'source_golden' — Informatica grouping edges
+--                               (preserve_source_golden_groups); match_key = the
+--                               Informatica id, rule_priority 0, edge_type 'source_golden'
+--   001_.. NNN_<rule_name>      RuleType 'exact' | 'fuzzy' — accepted waterfall edges
+--   999_Blocked_Source_GoldenRecordId_Merge
+--                               RuleType 'blocked' — engine edges DROPPED because they
+--                               would merge two Informatica groups
+--                               (allow_source_golden_group_merge = false). Not part of
+--                               MDMMatchLinks. blocked_source_group_merge = true and
+--                               src/dst_source_golden_id give the Informatica group each
+--                               endpoint belongs to (resolved group for transitive bridges).
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMRuleResults (
-  CountryCode           STRING,
-  RuleType              STRING,
-  RuleStageName         STRING,
-  RuleExecutionOrder    INT,
-  src                   BIGINT,
-  dst                   BIGINT,
-  SrcOperatorConcatId   STRING,
-  DstOperatorConcatId   STRING,
-  match_rule            STRING,
-  rule_priority         INT,
-  edge_type             STRING,
-  block_name            STRING,
-  match_key             STRING,
-  src_is_rule_subject   BOOLEAN,
-  dst_is_rule_subject   BOOLEAN
+  CountryCode                 STRING,
+  RuleType                    STRING,
+  RuleStageName               STRING,
+  RuleExecutionOrder          INT,
+  src                         BIGINT,
+  dst                         BIGINT,
+  SrcOperatorConcatId         STRING,
+  DstOperatorConcatId         STRING,
+  match_rule                  STRING,
+  rule_priority               INT,
+  edge_type                   STRING,
+  block_name                  STRING,
+  match_key                   STRING,
+  src_is_rule_subject         BOOLEAN,
+  dst_is_rule_subject         BOOLEAN,
+  blocked_source_group_merge  BOOLEAN,  -- only set (true) on the 999_Blocked_* stage
+  src_source_golden_id        BIGINT,   -- Informatica group of src (blocked stage only)
+  dst_source_golden_id        BIGINT    -- Informatica group of dst (blocked stage only)
 ) USING DELTA
-COMMENT 'Materialized match links per rule stage';
+COMMENT 'Materialized match links per rule stage (+ blocked Informatica group bridges)';
+-- Existing deployments: the engine writes with mergeSchema=true, so the three blocked-*
+-- columns are added automatically on the first run; or run
+-- ALTER TABLE pds_auroradsar_prod.schema_informatica.MDMRuleResults
+--   ADD COLUMNS (blocked_source_group_merge BOOLEAN, src_source_golden_id BIGINT, dst_source_golden_id BIGINT);
 
 -- -----------------------------------------------------------------------------
 -- MDMRuleEvaluations — fuzzy candidate evidence (matched and non-matched)
@@ -198,6 +223,8 @@ COMMENT 'Ephemeral matching state slices (active subjects, matched ids, etc.)';
 
 -- -----------------------------------------------------------------------------
 -- MDMMatchLinks — final undirected match edges for a country run
+-- Includes the Source_GoldenRecordId edges (edge_type 'source_golden') and excludes
+-- edges dropped as Informatica group bridges (see MDMRuleResults 999_Blocked_* stage).
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchLinks (
   CountryCode           STRING,
@@ -215,6 +242,13 @@ COMMENT 'Country-scoped match link graph edges';
 
 -- -----------------------------------------------------------------------------
 -- MDMComponentLabels — connected-component label iterations
+-- LabelStageName: labels_initial / labels_iter_NNN (min-label propagation);
+--   source_group_labels_initial / source_group_labels_iter_NNN (seeded propagation of
+--   Informatica ids inside components that bridged several groups; golden_id = the
+--   Informatica id label, NULL until reached) and labels_source_groups_resolved
+--   (IterationNumber 9999; final labels after dropping the bridging edges). The
+--   source_group_* stages only exist when allow_source_golden_group_merge = false
+--   and a bridge was actually detected.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMComponentLabels (
   CountryCode       STRING,
@@ -244,7 +278,12 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchedResu
   previous_golden_id_source     STRING,
   golden_id_changed             BOOLEAN,  -- previous_golden_id IS NOT NULL AND <> golden_id
   golden_id_differs_from_source BOOLEAN,  -- SourceGoldenRecordId IS NOT NULL AND <> golden_id
-  final_match_rule              STRING,
+                                          -- (always false when preserve_source_golden_groups
+                                          --  and allow_source_golden_group_merge = false)
+  final_match_rule              STRING,   -- rules that linked the record; includes
+                                          -- 'Source_GoldenRecordId' for Informatica groups,
+                                          -- 'Excluded from Match[, Source_GoldenRecordId]'
+                                          -- for excluded records, 'Self/No Match' for singles
   is_matched                    BOOLEAN,
   is_group_anchor               BOOLEAN,
   match_group_size              BIGINT

@@ -21,26 +21,47 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 4. **Standardize** match attributes (`c_name`, `c_zip`, `c_address`, soundex/prefix, …).
 5. **Exclude** via config filters + `MDMMatchExclusions`.
 6. **Exact / fuzzy waterfall** (`priorityMatching`) → per-rule links in `MDMRuleResults` / evaluations in `MDMRuleEvaluations`.
-7. **Match links** country slice → `MDMMatchLinks`.
-8. **Connected components** (native min-label iteration) → `MDMComponentLabels`.
-9. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`MDMRowRegistry.MDMGoldenId`), else mint from `MDMGoldenIdSequence`. Assignments are written back to `MDMRowRegistry`; remaps go to `MDMGoldenIdHistory`.
-10. **Matched results** → `MDMMatchedResults` (`replaceWhere` country).
+7. **Source golden group links** (`preserve_source_golden_groups`): star edges over every Informatica `SourceGoldenRecordId` shared by ≥ 2 records (all records, excluded ones included) → `MDMRuleResults` stage `000_Source_GoldenRecordId`; engine edges that directly bridge two Informatica groups are dropped when `allow_source_golden_group_merge` is false.
+8. **Match links** country slice → `MDMMatchLinks`.
+9. **Connected components** (native min-label iteration) → `MDMComponentLabels`; then, if merges are disallowed, components still holding several Informatica ids are re-labelled along group lines and the bridging edges are dropped (`MDMRuleResults` stage `999_Blocked_Source_GoldenRecordId_Merge`, `MDMMatchLinks` rewritten).
+10. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`MDMRowRegistry.MDMGoldenId`), else mint from `MDMGoldenIdSequence`. `validate_source_golden_group_assignments` fails fast if an Informatica group was split/renamed. Assignments are written back to `MDMRowRegistry`; remaps go to `MDMGoldenIdHistory`.
+11. **Matched results** → `MDMMatchedResults` (`replaceWhere` country).
 
-## Golden ID continuity policy (read before touching `golden_ids.py` / `_ensure_row_registry`)
+## Golden ID continuity policy (read before touching `golden_ids.py` / `source_golden_groups.py` / `_ensure_row_registry`)
 
 The company replaces Informatica MDM **country by country**. Hard requirements:
 
-1. Informatica golden ids already issued **never change**; a component containing one reuses it.
-2. New records get engine ids of the same shape (BIGINT), globally unique, **disjoint from
-   Informatica's range** (`golden_id_floor`, default 1 000 000 000, plus `> max` known id) and
-   **stable across runs** (previous assignment is preferred over minting).
-3. For a migrated country the source `GoldenRecordId` may go NULL: the registry MERGE never
-   downgrades a non-null `SourceGoldenRecordId` to NULL.
+1. **Informatica groupings are preserved as hard links.** Records that Informatica grouped
+ under one `GoldenRecordId` are star-linked (`match_rule = Source_GoldenRecordId`, stage
+ `000_Source_GoldenRecordId`, `edge_type = source_golden`) before connected components, so
+ the engine can never split such a group and the group always keeps its Informatica id
+ (`preserve_source_golden_groups`, default true). This also applies to records excluded from
+ new matching: exclusions stop *new* matches, they never undo Informatica's grouping.
+2. New records (no Informatica id) that match a group member **inherit the group's id**;
+ records forming a **brand-new cluster** get an engine id: same shape (BIGINT), globally
+ unique, **disjoint from Informatica's range** (`golden_id_floor` = **100 000 000** (1e8),
+ plus `> max` known id) and **stable across runs** (previous assignment is preferred over
+ minting). Informatica's max id was 9 999 993 in Sep 2026 and still grows slowly for
+ non-migrated countries; `validate_golden_id_space` fails the run if it ever reaches the floor.
+ The floor must be **identical in every country config** and may **only ever be raised**.
+3. **Two Informatica groups bridged by engine rules**: with `allow_source_golden_group_merge =
+ false` (MY default) the bridging edges are dropped (direct bridges before components,
+ transitive bridges via a seeded re-labelling after components) and written to
+ `MDMRuleResults` stage `999_Blocked_Source_GoldenRecordId_Merge` for stewardship — no
+ Informatica id ever changes. With `true`, the component keeps one id (earliest
+ `GoldenIDCreatedDate`, then smallest) and the other is logged as `MERGE`.
+4. For a migrated country the source `GoldenRecordId` may go NULL: the registry MERGE never
+ downgrades a non-null `SourceGoldenRecordId` to NULL. The source column is a numeric
+ STRING; a non-blank non-integer value fails the run instead of silently casting to NULL.
+5. `validate_source_golden_group_assignments` fails the run (before any write-back) if an
+ Informatica id would end up on more than one component, on an engine-minted id, or (when
+ merges are disallowed) on a different id.
 
 Selection order per component: Informatica id (earliest `GoldenIDCreatedDate`, then smallest) →
 prior `ENGINE` id (earliest `MDMGoldenIdAssignedDate`, then smallest) → mint. An id shared by
 several components is claimed by the one with most incumbent records (then most records,
-earliest date, smallest `TempClusterId`); the others get their own prior id or a new one.
+earliest date, smallest `TempClusterId`); the others get their own prior id or a new one
+(with preserved groups this only ever concerns engine ids).
 Merges/splits are logged to `MDMGoldenIdHistory` (`Reason` = `MERGE` | `SPLIT`).
 Full description: `docs/ARCHITECTURE.md` → "Golden IDs (Informatica continuity)".
 `SYNTHETIC_GOLDEN_ID_OFFSET` is deprecated and unused.
@@ -59,7 +80,7 @@ from matching.config import load_country_config
 | `MDMRowRegistry` | Stable `MDMRowId` IDENTITY keys per `CountryCode` + `OperatorConcatId`; golden id crosswalk (`SourceGoldenRecordId`, `MDMGoldenId`, `MDMGoldenIdSource`, `MDMGoldenIdAssignedDate`) |
 | `MDMGoldenIdSequence` | High-water mark for engine-minted golden ids (single global row) |
 | `MDMGoldenIdHistory` | Append-only old → new golden id remaps per run (`MERGE` / `SPLIT`) |
-| `MDMRuleResults` | Accepted match edges per rule stage |
+| `MDMRuleResults` | Accepted match edges per rule stage (incl. `000_Source_GoldenRecordId`); dropped Informatica-group bridges in stage `999_Blocked_Source_GoldenRecordId_Merge` (`blocked_source_group_merge`) |
 | `MDMRuleEvaluations` | Fuzzy candidate evidence (similarities as % ints) |
 | `MDMMatchExclusions` | Stewardship “do not match” keys |
 | `MDMMatchingState` | Intermediate ID sets for waterfall / grouping |
@@ -114,7 +135,8 @@ Intended layout:
 | `fuzzy_match.py` | Blocking + fuzzy scores + evaluations |
 | `match_pipeline.py` | Waterfall orchestration |
 | `components.py` | `connected_components_native` (raises on non-convergence) |
-| `golden_ids.py` | Golden id continuity: candidate claim/choice, allocator, registry write-back, history |
+| `source_golden_groups.py` | Informatica groupings as hard links; direct/transitive bridge blocking; blocked-edge stewardship output |
+| `golden_ids.py` | Golden id continuity: candidate claim/choice, allocator, registry write-back, history, group-preservation validation |
 | `pipeline.py` | Enrich, registry, exclusions, `run_country` / `run_all` |
 
 ### `src/dq/` — data quality
@@ -161,7 +183,8 @@ Do not commit secrets. `.gitignore` already covers `.env` and `.env.*`.
 
 ## Editing guidance for agents
 
-- Preserve match semantics (priorities, exclusions, block size caps) and the golden id continuity policy above (never re-mint an id the registry already knows; keep `golden_id_floor` identical across countries).
+- Preserve match semantics (priorities, exclusions, block size caps) and the golden id continuity policy above (never re-mint an id the registry already knows; never split or rename an Informatica group; keep `golden_id_floor` identical across countries and only raise it).
+- Source golden group edges live **outside** the priority waterfall on purpose: they must not change which rule other records match on. Do not fold them into `run_match_pipeline`.
 - Prefer small, focused changes; do not “simplify away” stewardship tables or waterfall.
 - When adding countries, copy `conf/countries/template.json` → `conf/countries/<CC>.json` and edit; do not hardcode rules in Python. `template.json` / `_*.json` are never loaded as countries.
 - Identity column DDL for `MDMRowId` may need env-specific adjustment — see comments in `sql/setup_tables.sql`.

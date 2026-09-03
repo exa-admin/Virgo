@@ -28,11 +28,30 @@ DEFAULT_COMPONENTS_MAX_ITERATIONS = 30
 # always >= golden_id_floor AND > every golden id already known to the registry
 # (Informatica SourceGoldenRecordId or engine MDMGoldenId). The floor keeps the
 # engine range disjoint from the range Informatica can still reach for
-# countries it continues to serve. Override per country via "golden_id_floor".
-DEFAULT_GOLDEN_ID_FLOOR = 1_000_000_000
+# countries it continues to serve. Override per country via "golden_id_floor";
+# the value must be identical in every country config and may only ever be raised.
+# Informatica GoldenRecordId was confirmed at ~9 999 993 (Sep 2026) and still grows
+# slowly for non-migrated countries; 1e8 gives 10x headroom with 9-digit engine ids.
+DEFAULT_GOLDEN_ID_FLOOR = 100_000_000
 DEFAULT_GOLDEN_ID_SEQUENCE_NAME = "MDMGoldenId"
 GOLDEN_ID_SOURCE_INFORMATICA = "INFORMATICA"
 GOLDEN_ID_SOURCE_ENGINE = "ENGINE"
+
+# Informatica groupings as hard links (see docs/ARCHITECTURE.md "Source golden groups").
+# preserve_source_golden_groups: records sharing a non-null SourceGoldenRecordId are
+#   linked by star edges before connected components, so an Informatica group can never
+#   be split and always keeps its id (also for records excluded from new matching).
+# allow_source_golden_group_merge: when False, engine edges that would put two different
+#   Informatica ids into one component are dropped (and recorded) so no Informatica id
+#   ever changes; when True the component keeps one id and logs the other as MERGE.
+DEFAULT_PRESERVE_SOURCE_GOLDEN_GROUPS = True
+DEFAULT_ALLOW_SOURCE_GOLDEN_GROUP_MERGE = False
+SOURCE_GOLDEN_GROUP_RULE_NAME = "Source_GoldenRecordId"
+SOURCE_GOLDEN_GROUP_RULE_PRIORITY = 0
+SOURCE_GOLDEN_GROUP_EDGE_TYPE = "source_golden"
+SOURCE_GOLDEN_GROUP_BLOCK_NAME = "source_golden_group"
+SOURCE_GOLDEN_GROUP_RULE_STAGE = "000_Source_GoldenRecordId"
+BLOCKED_SOURCE_GROUP_MERGE_RULE_STAGE = "999_Blocked_Source_GoldenRecordId_Merge"
 
 # DEPRECATED: pre-registry runs derived synthetic ids as OFFSET + min(MDMRowId).
 # No longer used by the engine (ids were unstable and could collide with
@@ -124,4 +143,10 @@ def _runtime_cfg(country_code: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "golden_id_floor": int(cfg.get("golden_id_floor", DEFAULT_GOLDEN_ID_FLOOR)),
         "golden_id_sequence_name": str(cfg.get("golden_id_sequence_name", DEFAULT_GOLDEN_ID_SEQUENCE_NAME)),
         "components_max_iterations": int(cfg.get("components_max_iterations", DEFAULT_COMPONENTS_MAX_ITERATIONS)),
+        "preserve_source_golden_groups": bool(
+            cfg.get("preserve_source_golden_groups", DEFAULT_PRESERVE_SOURCE_GOLDEN_GROUPS)
+        ),
+        "allow_source_golden_group_merge": bool(
+            cfg.get("allow_source_golden_group_merge", DEFAULT_ALLOW_SOURCE_GOLDEN_GROUP_MERGE)
+        ),
     }
