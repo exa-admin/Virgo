@@ -11,10 +11,23 @@ This repository holds the **Python PySpark** match pipeline that assigns stable 
 ```
 Source → (optional enrichment) → Row registry → Standardize → Exclusions
   → Exact/Fuzzy waterfall → Match links → Connected components
-  → Golden IDs → MDMMatchedResults
+  → Golden IDs (Informatica id > prior engine id > mint) → MDMMatchedResults
 ```
 
 Details and a mermaid flowchart: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Golden ID continuity (Informatica migration)
+
+Informatica MDM is being replaced country by country, so golden ids must survive the switch:
+
+- A component that contains records with an Informatica `GoldenRecordId` **reuses it** (earliest first).
+- Otherwise the component keeps the id the engine assigned on a previous run (stored in `MDMRowRegistry.MDMGoldenId`).
+- Otherwise a new BIGINT id is minted from `MDMGoldenIdSequence`: always `>= golden_id_floor` (default `1000000000`, per country config — use the same value everywhere) and greater than every id already known, so it can never collide with Informatica.
+- Known Informatica ids are never overwritten with NULL once Informatica stops feeding a migrated country.
+- Every old → new remap (cluster merges/splits) is appended to `MDMGoldenIdHistory`; per-record detail is in `MDMMatchedResults` (`previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `golden_id_source`).
+
+Full policy, tie-breaking and safety checks: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#golden-ids-informatica-continuity).
+Existing deployments: run the `ALTER TABLE MDMRowRegistry ADD COLUMNS …` and new `CREATE TABLE` statements in `sql/setup_tables.sql`.
 
 ## Repository layout
 
@@ -79,6 +92,8 @@ Country JSON (e.g. `conf/countries/MY.json`) controls:
 - `filter_condition` — source filter (`CountryCode = 'MY'`)
 - `EnrichDate` — join Google Places / enriched operators when true
 - `priorityMatching` — waterfall (already-matched records leave later rules as subjects only)
+- `golden_id_floor` — lower bound for engine-minted golden ids (keep identical across countries)
+- `components_max_iterations` — connected-components iteration budget (run fails if not converged)
 - `invalid_values`, `exclude_from_match_filters`
 - `standardization` — name/city/state/zip/address columns
 - `exact_match_rules` / `fuzzy_match_rules` — priorities, methods, exclusions
@@ -138,7 +153,7 @@ display(df)  # Databricks notebook; locally print(df) is fine
 
 ## Not built yet
 
-Merge/survivorship, incremental match, stewardship UI, XREF history, automated tests.
+Merge/survivorship, incremental match, stewardship UI, automated tests. (Golden id remap history exists in `MDMGoldenIdHistory`; match-evidence history does not.)
 
 ## License
 

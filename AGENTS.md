@@ -23,8 +23,27 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 6. **Exact / fuzzy waterfall** (`priorityMatching`) → per-rule links in `MDMRuleResults` / evaluations in `MDMRuleEvaluations`.
 7. **Match links** country slice → `MDMMatchLinks`.
 8. **Connected components** (native min-label iteration) → `MDMComponentLabels`.
-9. **Golden IDs** (prefer earliest `SourceGoldenRecordId`, else `SYNTHETIC_GOLDEN_ID_OFFSET + TempClusterId`).
+9. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`MDMRowRegistry.MDMGoldenId`), else mint from `MDMGoldenIdSequence`. Assignments are written back to `MDMRowRegistry`; remaps go to `MDMGoldenIdHistory`.
 10. **Matched results** → `MDMMatchedResults` (`replaceWhere` country).
+
+## Golden ID continuity policy (read before touching `golden_ids.py` / `_ensure_row_registry`)
+
+The company replaces Informatica MDM **country by country**. Hard requirements:
+
+1. Informatica golden ids already issued **never change**; a component containing one reuses it.
+2. New records get engine ids of the same shape (BIGINT), globally unique, **disjoint from
+   Informatica's range** (`golden_id_floor`, default 1 000 000 000, plus `> max` known id) and
+   **stable across runs** (previous assignment is preferred over minting).
+3. For a migrated country the source `GoldenRecordId` may go NULL: the registry MERGE never
+   downgrades a non-null `SourceGoldenRecordId` to NULL.
+
+Selection order per component: Informatica id (earliest `GoldenIDCreatedDate`, then smallest) →
+prior `ENGINE` id (earliest `MDMGoldenIdAssignedDate`, then smallest) → mint. An id shared by
+several components is claimed by the one with most incumbent records (then most records,
+earliest date, smallest `TempClusterId`); the others get their own prior id or a new one.
+Merges/splits are logged to `MDMGoldenIdHistory` (`Reason` = `MERGE` | `SPLIT`).
+Full description: `docs/ARCHITECTURE.md` → "Golden IDs (Informatica continuity)".
+`SYNTHETIC_GOLDEN_ID_OFFSET` is deprecated and unused.
 
 Public API:
 
@@ -37,14 +56,16 @@ from matching.config import load_country_config
 
 | Table | Role |
 |-------|------|
-| `MDMRowRegistry` | Stable `MDMRowId` IDENTITY keys per `CountryCode` + `OperatorConcatId` |
+| `MDMRowRegistry` | Stable `MDMRowId` IDENTITY keys per `CountryCode` + `OperatorConcatId`; golden id crosswalk (`SourceGoldenRecordId`, `MDMGoldenId`, `MDMGoldenIdSource`, `MDMGoldenIdAssignedDate`) |
+| `MDMGoldenIdSequence` | High-water mark for engine-minted golden ids (single global row) |
+| `MDMGoldenIdHistory` | Append-only old → new golden id remaps per run (`MERGE` / `SPLIT`) |
 | `MDMRuleResults` | Accepted match edges per rule stage |
 | `MDMRuleEvaluations` | Fuzzy candidate evidence (similarities as % ints) |
 | `MDMMatchExclusions` | Stewardship “do not match” keys |
 | `MDMMatchingState` | Intermediate ID sets for waterfall / grouping |
 | `MDMMatchLinks` | Final country match graph |
 | `MDMComponentLabels` | Component labels per iteration |
-| `MDMMatchedResults` | Output with `golden_id`, `final_match_rule`, flags |
+| `MDMMatchedResults` | Output with `golden_id`, `golden_id_source`, `previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `final_match_rule`, flags |
 | `mdmenrichedoperators` | External enrichment (not created by setup SQL) |
 
 Defaults live in `matching.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.schema_informatica`.
@@ -92,8 +113,8 @@ Intended layout:
 | `exact_match.py` | Star edges, block caps, priority |
 | `fuzzy_match.py` | Blocking + fuzzy scores + evaluations |
 | `match_pipeline.py` | Waterfall orchestration |
-| `components.py` | `connected_components_native` |
-| `golden_ids.py` | Final golden IDs + match rule aggregate |
+| `components.py` | `connected_components_native` (raises on non-convergence) |
+| `golden_ids.py` | Golden id continuity: candidate claim/choice, allocator, registry write-back, history |
 | `pipeline.py` | Enrich, registry, exclusions, `run_country` / `run_all` |
 
 ### `src/dq/` — data quality
@@ -134,13 +155,13 @@ Do not commit secrets. `.gitignore` already covers `.env` and `.env.*`.
 - Merge / survivorship of golden attributes
 - Incremental / CDC match
 - Stewardship UI
-- XREF / match history beyond current Delta tables
+- Match history beyond current Delta tables (golden id remaps are in `MDMGoldenIdHistory`)
 - Automated unit/integration tests
 - Local runnable Spark without Databricks (package is Databricks-oriented)
 
 ## Editing guidance for agents
 
-- Preserve match semantics (priorities, exclusions, block size caps, synthetic offset `100000000`).
+- Preserve match semantics (priorities, exclusions, block size caps) and the golden id continuity policy above (never re-mint an id the registry already knows; keep `golden_id_floor` identical across countries).
 - Prefer small, focused changes; do not “simplify away” stewardship tables or waterfall.
 - When adding countries, copy `conf/countries/template.json` → `conf/countries/<CC>.json` and edit; do not hardcode rules in Python. `template.json` / `_*.json` are never loaded as countries.
 - Identity column DDL for `MDMRowId` may need env-specific adjustment — see comments in `sql/setup_tables.sql`.

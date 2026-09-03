@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import Window
 from pyspark.sql import functions as F
 
 from matching.components import connected_components_native
@@ -21,11 +22,22 @@ from matching.delta_io import (
     _require_table,
     _require_table_columns,
 )
-from matching.golden_ids import _build_final_golden_ids, collect_record_match_rules
+from matching.golden_ids import (
+    PREVIOUS_GOLDEN_ID_ASSIGNED_COLUMN,
+    PREVIOUS_GOLDEN_ID_COLUMN,
+    PREVIOUS_GOLDEN_ID_SOURCE_COLUMN,
+    _build_final_golden_ids,
+    append_golden_id_history,
+    build_golden_id_history,
+    collect_record_match_rules,
+    persist_golden_id_assignments,
+    validate_golden_id_space,
+)
 from matching.match_pipeline import run_match_pipeline
 from matching.standardize import standardize_input
 from matching.utils import (
     _ensure_columns,
+    _is_empty,
     _matched_record_ids_from_links,
     _require_dataframe_columns,
     _sql_literal,
@@ -35,33 +47,42 @@ from matching.utils import (
     timed,
 )
 
+ROW_REGISTRY_REQUIRED_COLUMNS = [
+    "CountryCode",
+    "MDMRowId",
+    "OperatorConcatId",
+    "SourceGoldenRecordId",
+    "GoldenIDCreatedDate",
+    "MDMGoldenId",
+    "MDMGoldenIdSource",
+    "MDMGoldenIdAssignedDate",
+    "DateCreated",
+    "DateUpdated",
+]
+
 def _ensure_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
+    """MERGE source keys into MDMRowRegistry and attach MDMRowId + golden id context.
+
+    Informatica id policy: ``SourceGoldenRecordId`` is only written when the source
+    carries a non-null value. A non-null id is never downgraded to NULL (Informatica
+    stops populating it once a country migrates to this engine), but a non-null id may
+    change to another non-null id (Informatica re-merged while it still owns the country).
+    """
     spark = source.sparkSession
     row_registry_table = cfg["rowRegistryTable"]
     row_registry_key_column = cfg["rowRegistryKeyColumn"]
     invalid_values = cfg.get("invalid_values", [])
     _require_table(spark, row_registry_table)
-    _require_table_columns(
-        spark,
-        row_registry_table,
-        [
-            "CountryCode",
-            "MDMRowId",
-            "OperatorConcatId",
-            "SourceGoldenRecordId",
-            "GoldenIDCreatedDate",
-            "DateCreated",
-            "DateUpdated",
-        ],
-    )
+    _require_table_columns(spark, row_registry_table, ROW_REGISTRY_REQUIRED_COLUMNS)
 
     _require_dataframe_columns(source, [row_registry_key_column, "CountryCode", "GoldenRecordId", "BDLLoadTimestamp"], "Source DataFrame")
 
-    if row_registry_key_column not in source.columns:
-        raise ValueError(f"Configured rowRegistryKeyColumn '{row_registry_key_column}' does not exist in the source DataFrame")
-    if "CountryCode" not in source.columns:
-        raise ValueError("Source DataFrame must contain CountryCode to use country-partitioned registry tables.")
-
+    # Deterministic one-row-per-key: prefer a row that carries an Informatica id, then the
+    # earliest load timestamp, then the smallest id (dropDuplicates would pick arbitrarily).
+    key_window = Window.partitionBy("CountryCode", "OperatorConcatId").orderBy(
+        F.col("SourceGoldenRecordId").asc_nulls_last(),
+        F.col("GoldenIDCreatedDate").asc_nulls_last(),
+    )
     registry_source = (
         source.select(
             F.trim(F.coalesce(F.col("CountryCode").cast("string"), F.lit(""))).alias("CountryCode"),
@@ -71,7 +92,9 @@ def _ensure_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
         )
         .filter(F.col("CountryCode") != "")
         .filter(_valid_value(F.col("OperatorConcatId"), invalid_values, 1))
-        .dropDuplicates(["CountryCode", "OperatorConcatId"])
+        .withColumn("_key_rank", F.row_number().over(key_window))
+        .filter(F.col("_key_rank") == F.lit(1))
+        .drop("_key_rank")
     )
 
     merge_view = "TmpMDMRowRegistrySource"
@@ -82,7 +105,9 @@ def _ensure_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
         USING {merge_view} AS source
         ON target.CountryCode = source.CountryCode
            AND target.OperatorConcatId = source.OperatorConcatId
-        WHEN MATCHED THEN UPDATE SET
+        WHEN MATCHED AND source.SourceGoldenRecordId IS NOT NULL
+             AND (target.SourceGoldenRecordId IS NULL
+                  OR target.SourceGoldenRecordId <> source.SourceGoldenRecordId) THEN UPDATE SET
           target.SourceGoldenRecordId = source.SourceGoldenRecordId,
           target.GoldenIDCreatedDate = source.GoldenIDCreatedDate,
           target.DateUpdated = current_timestamp()
@@ -105,22 +130,24 @@ def _ensure_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
         """
     )
 
+    # Registry values win over the raw source: SourceGoldenRecordId keeps the last known
+    # Informatica id even when the source has gone NULL for a migrated country.
     registry = spark.table(row_registry_table).select(
         "CountryCode",
+        F.col("OperatorConcatId").alias(row_registry_key_column),
         "MDMRowId",
-        "OperatorConcatId",
         "SourceGoldenRecordId",
         "GoldenIDCreatedDate",
+        F.col("MDMGoldenId").alias(PREVIOUS_GOLDEN_ID_COLUMN),
+        F.col("MDMGoldenIdSource").alias(PREVIOUS_GOLDEN_ID_SOURCE_COLUMN),
+        F.col("MDMGoldenIdAssignedDate").alias(PREVIOUS_GOLDEN_ID_ASSIGNED_COLUMN),
     )
     enriched = (
         source.withColumn("CountryCode", F.trim(F.coalesce(F.col("CountryCode").cast("string"), F.lit(""))))
         .withColumn(row_registry_key_column, F.trim(F.coalesce(F.col(row_registry_key_column).cast("string"), F.lit(""))))
         .join(registry, ["CountryCode", row_registry_key_column], "left")
     )
-
-    if enriched.filter(F.col("MDMRowId").isNull()).limit(1).count() > 0:
-        raise ValueError(f"Some rows did not receive an MDMRowId from {row_registry_table}")
-
+    # Callers validate MDMRowId presence after persisting (avoids a second full source scan here).
     return enriched
 
 def _load_match_exclusions(processed_df: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
@@ -206,15 +233,9 @@ def _enrich_source_data(source_df: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
 def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> DataFrame:
     cfg = _runtime_cfg(country_code, cfg)
     required_tables = {
-        cfg["rowRegistryTable"]: [
-            "CountryCode",
-            "MDMRowId",
-            "OperatorConcatId",
-            "SourceGoldenRecordId",
-            "GoldenIDCreatedDate",
-            "DateCreated",
-            "DateUpdated",
-        ],
+        cfg["rowRegistryTable"]: ROW_REGISTRY_REQUIRED_COLUMNS,
+        cfg["goldenIdHistoryTable"]: ["CountryCode", "OldGoldenId", "NewGoldenId", "Reason", "RecordCount", "RunTimestamp"],
+        cfg["goldenIdSequenceTable"]: ["SequenceName", "NextValue", "DateUpdated"],
         cfg["ruleResultsTable"]: [
             "CountryCode",
             "RuleType",
@@ -310,10 +331,13 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
         source = _ensure_row_registry(source, cfg)
         processed = standardize_input(source, cfg).persist(StorageLevel.MEMORY_AND_DISK)
         processed.count()
-        if processed.filter(_valid_value(F.col("record_id"), cfg.get("invalid_values", []), 1)).limit(1).count() == 0:
+        if not _is_empty(processed.filter(F.col("MDMRowId").isNull())):
+            raise ValueError(f"Some rows did not receive an MDMRowId from {cfg['rowRegistryTable']}")
+        if _is_empty(processed.filter(_valid_value(F.col("record_id"), cfg.get("invalid_values", []), 1))):
             raise ValueError(
                 f"No valid record_id values were generated from MDMRowRegistry table {cfg['rowRegistryTable']}."
             )
+        validate_golden_id_space(spark, cfg)
 
         config_excluded_ids = (
             processed.filter(_sql_or(cfg.get("exclude_from_match_filters")) or "false")
@@ -382,10 +406,18 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
             cfg,
         )
 
-    with timed(f"Country {country_code}: final output"):
+    with timed(f"Country {country_code}: golden ids"):
         record_rules = collect_record_match_rules(all_match_links)
-        final_golden_ids = _build_final_golden_ids(processed, components).persist(StorageLevel.MEMORY_AND_DISK)
+        # Persisted inside; one row per distinct record_id with golden_id / source / is_new.
+        final_golden_ids = _build_final_golden_ids(processed, components, cfg)
+        # Registry first: if the results write fails afterwards, a re-run reuses these ids
+        # (tier 2) instead of minting again.
+        persist_golden_id_assignments(final_golden_ids, cfg, country_code)
+
+    with timed(f"Country {country_code}: final output"):
         match_group_sizes = final_golden_ids.groupBy("golden_id").agg(F.count("*").alias("match_group_size"))
+        previous_golden_id = F.col(PREVIOUS_GOLDEN_ID_COLUMN).cast("long")
+        source_golden_id = F.col("SourceGoldenRecordId").cast("long")
         final_df = (
             processed.join(final_golden_ids, "record_id", "left")
             .join(record_rules, "record_id", "left")
@@ -406,8 +438,31 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
                 ).otherwise(F.col("match_group_size") > F.lit(1)),
             )
             .withColumn("is_group_anchor", F.coalesce(F.col("record_id") == F.col("TempClusterId"), F.lit(False)))
-            .drop("is_excluded_from_match", "TempClusterId")
-        )
+            # Golden id continuity / migration validation columns.
+            .withColumn("previous_golden_id", previous_golden_id)
+            .withColumn("previous_golden_id_source", F.col(PREVIOUS_GOLDEN_ID_SOURCE_COLUMN).cast("string"))
+            .withColumn("golden_id_is_new", F.coalesce(F.col("golden_id_is_new"), F.lit(False)))
+            .withColumn(
+                "golden_id_changed",
+                previous_golden_id.isNotNull() & (previous_golden_id != F.col("golden_id")),
+            )
+            .withColumn(
+                "golden_id_differs_from_source",
+                source_golden_id.isNotNull() & (source_golden_id != F.col("golden_id")),
+            )
+            .drop(
+                "is_excluded_from_match",
+                "TempClusterId",
+                PREVIOUS_GOLDEN_ID_COLUMN,
+                PREVIOUS_GOLDEN_ID_SOURCE_COLUMN,
+                PREVIOUS_GOLDEN_ID_ASSIGNED_COLUMN,
+            )
+        ).persist(StorageLevel.MEMORY_AND_DISK)
+        final_df.count()
+
+        history_count = append_golden_id_history(build_golden_id_history(final_df, country_code), cfg)
+        print(f"  -> Golden id transitions recorded in {cfg['goldenIdHistoryTable']}: {history_count}")
+
         _overwrite_delta_slice(
             final_df,
             cfg["matchedResultsTable"],
@@ -422,8 +477,11 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
     processed.unpersist()
     matchable.unpersist()
     final_golden_ids.unpersist()
+    final_df.unpersist()
     print(f"Saved {country_code} matched output to {cfg['matchedResultsTable']}")
-    return final_df
+    # Return the persisted Delta slice rather than the lazy plan so callers (e.g. display())
+    # do not silently recompute the pipeline.
+    return spark.table(cfg["matchedResultsTable"]).where(f"CountryCode = '{_sql_literal(country_code)}'")
 
 def run_all(
     spark: SparkSession,

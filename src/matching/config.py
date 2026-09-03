@@ -21,6 +21,22 @@ DEFAULT_ROW_REGISTRY_TABLE = "MDMRowRegistry"
 DEFAULT_ROW_REGISTRY_KEY_COLUMN = "OperatorConcatId"
 DEFAULT_EXACT_MAX_BLOCK_SIZE = 50000
 DEFAULT_FUZZY_MAX_BLOCK_SIZE = 500
+DEFAULT_COMPONENTS_MAX_ITERATIONS = 30
+
+# Golden ID continuity (see docs/ARCHITECTURE.md "Golden IDs").
+# Engine-minted golden IDs are allocated from a Delta-backed sequence and are
+# always >= golden_id_floor AND > every golden id already known to the registry
+# (Informatica SourceGoldenRecordId or engine MDMGoldenId). The floor keeps the
+# engine range disjoint from the range Informatica can still reach for
+# countries it continues to serve. Override per country via "golden_id_floor".
+DEFAULT_GOLDEN_ID_FLOOR = 1_000_000_000
+DEFAULT_GOLDEN_ID_SEQUENCE_NAME = "MDMGoldenId"
+GOLDEN_ID_SOURCE_INFORMATICA = "INFORMATICA"
+GOLDEN_ID_SOURCE_ENGINE = "ENGINE"
+
+# DEPRECATED: pre-registry runs derived synthetic ids as OFFSET + min(MDMRowId).
+# No longer used by the engine (ids were unstable and could collide with
+# Informatica ids). Kept only so older notebooks importing it do not break.
 SYNTHETIC_GOLDEN_ID_OFFSET = 100000000
 ENRICHMENT_COLUMN_MAPPINGS = [
     ("OperatorName", "OperatorName"),
@@ -101,6 +117,11 @@ def _runtime_cfg(country_code: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "matchLinksTable": f"{DEFAULT_TARGET_SCHEMA}.MDMMatchLinks",
         "componentLabelsTable": f"{DEFAULT_TARGET_SCHEMA}.MDMComponentLabels",
         "matchedResultsTable": f"{DEFAULT_TARGET_SCHEMA}.MDMMatchedResults",
+        "goldenIdHistoryTable": f"{DEFAULT_TARGET_SCHEMA}.MDMGoldenIdHistory",
+        "goldenIdSequenceTable": f"{DEFAULT_TARGET_SCHEMA}.MDMGoldenIdSequence",
         "exact_max_block_size": DEFAULT_EXACT_MAX_BLOCK_SIZE,
         "fuzzy_max_block_size": DEFAULT_FUZZY_MAX_BLOCK_SIZE,
+        "golden_id_floor": int(cfg.get("golden_id_floor", DEFAULT_GOLDEN_ID_FLOOR)),
+        "golden_id_sequence_name": str(cfg.get("golden_id_sequence_name", DEFAULT_GOLDEN_ID_SEQUENCE_NAME)),
+        "components_max_iterations": int(cfg.get("components_max_iterations", DEFAULT_COMPONENTS_MAX_ITERATIONS)),
     }

@@ -12,17 +12,27 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
+@contextmanager
 def timed(step_name: str):
     started = time.time()
     print(f"[{step_name}] STARTED")
-    yield
-    print(f"[{step_name}] FINISHED in {time.time() - started:0.2f}s")
+    try:
+        yield
+    finally:
+        print(f"[{step_name}] FINISHED in {time.time() - started:0.2f}s")
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_").lower()
 
 def _sql_literal(value: str) -> str:
     return value.replace("'", "''")
+
+def _is_empty(df: DataFrame) -> bool:
+    """True when df has no rows. Uses DataFrame.isEmpty (Spark >= 3.3) when available."""
+    is_empty = getattr(df, "isEmpty", None)
+    if callable(is_empty):
+        return bool(is_empty())
+    return df.limit(1).count() == 0
 
 def _require_dataframe_columns(df: DataFrame, required_columns: List[str], label: str) -> None:
     missing_columns = [column_name for column_name in required_columns if column_name not in df.columns]

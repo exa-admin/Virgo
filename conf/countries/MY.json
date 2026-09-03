@@ -2,6 +2,8 @@
   "filter_condition": "CountryCode = 'MY'",
   "EnrichDate": true,
   "priorityMatching": true,
+  "golden_id_floor": 1000000000,
+  "components_max_iterations": 30,
   "invalid_values": [
     "",
     "null",
