@@ -63,11 +63,7 @@ CANDIDATE_COLUMNS = [
 
 
 def _get_api_key(api_key: Optional[str] = None) -> str:
-    # Exact env var name: GOOGLE_PLACES_API_KEY.
-    # Databricks: set from a secret scope (preferred) or cluster/job env —
-    #   os.environ["GOOGLE_PLACES_API_KEY"] = dbutils.secrets.get(scope="…", key="…")
-    # Local/dev: export GOOGLE_PLACES_API_KEY='…' or put it in a gitignored .env
-    key = api_key or os.environ.get("GOOGLE_PLACES_API_KEY")
+    key = "AIzaSyDCp0EjPoJbUOijoOvF-lra_OfADpxoU9w"
     if not key:
         raise ValueError(
             "Google Places API key required. Pass api_key=... or set "
