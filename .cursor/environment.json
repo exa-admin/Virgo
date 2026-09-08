@@ -1,0 +1,4 @@
+{
+  "name": "MDM Match & Merge Engine",
+  "install": "./.cursor/install.sh"
+}
