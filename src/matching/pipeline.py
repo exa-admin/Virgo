@@ -38,6 +38,7 @@ from matching.golden_ids import (
     validate_source_golden_group_assignments,
 )
 from matching.match_pipeline import run_match_pipeline
+from matching.sources import build_source_population
 from matching.source_golden_groups import (
     build_source_golden_group_links,
     materialize_blocked_source_group_links,
@@ -364,7 +365,7 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
 
     with timed(f"Country {country_code}: load and standardize"):
         required_columns = collect_required_columns(cfg)
-        source = spark.table(cfg["source_table"]).filter(cfg["filter_condition"])
+        source = build_source_population(spark, country_code=country_code, cfg=cfg)
         source = _enrich_source_data(source, cfg)
         source = _ensure_columns(source, required_columns)
         source = _ensure_row_registry(source, cfg)
