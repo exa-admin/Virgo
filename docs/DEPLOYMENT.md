@@ -17,10 +17,10 @@ Build both:
 
 ## One-time setup (either shape)
 
-1. Create the Delta tables: open `sql/setup_tables.sql`, replace
-   `pds_auroradsar_prod.schema_informatica` with your target `catalog.schema`, and run it
-   (SQL editor or a notebook cell). This is also the `target_schema` value in
-   `conf/base.json` — keep them in sync.
+1. Create the Delta tables: run `sql/setup_tables.sql` (SQL editor or a notebook cell). It
+   already targets `pds_auroradsar_prod.schema_informatica`, which is also the
+   `target_schema` in `conf/base.json` — run it as-is; no edits needed. (Only change that
+   name, in both places, if your workspace genuinely uses a different catalog/schema.)
 2. Confirm the source views are readable:
    - `sl_bdl_processed_cd_prod.cd.vw_ufsoperator` (operator / population to match)
    - `sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden` (golden / already-matched masters)
@@ -28,50 +28,57 @@ Build both:
    These are set in `conf/base.json` under `source` / `golden_source`. To read files
    instead of tables, change the spec (see "Swapping the source format" below).
 
-## Option A — Deploy as a folder (recommended)
+## Option A — Deploy as a folder via UI upload (no CLI, no Git)
 
-The whole project lives as one folder in Databricks; notebooks add `src/` to `sys.path`
-and `conf/` resolves next to it. Pick whichever upload method you have access to.
+The whole project lives as one folder; a notebook adds `src/` to `sys.path` and `conf/`
+resolves next to it. This is the pure point-and-click path.
 
-### A1. Git Repos (no build step)
+1. **Build the bundle locally** (once): `./scripts/build_databricks_bundle.sh` →
+   `dist/mdm_engine_bundle.zip`.
 
-1. In Databricks: **Workspace → Repos → Add Repo**, paste this repo's Git URL. You now
-   have a folder like `/Workspace/Repos/<you>/<repo>/` containing `src/ conf/ sql/ notebooks/`.
-2. Open `notebooks/01_run_match_country.py`. It runs `%run ./00_path_setup` first, which
-   finds `src/` and adds it to `sys.path` automatically. Set the `country_code` widget and
-   run all cells. (Pull to update; branches/PRs work as usual.)
+2. **Upload the zip to a Unity Catalog Volume** (a Volume is the UI-friendly place for
+   arbitrary files):
+   - Databricks left nav → **Catalog** → pick a catalog/schema → a **Volume** (create one
+     with **Create → Volume** if needed).
+   - Click **Upload to this volume** and select `mdm_engine_bundle.zip`. It lands at
+     `/Volumes/<catalog>/<schema>/<volume>/mdm_engine_bundle.zip`.
 
-### A2. Databricks CLI — upload the folder
+3. **Unzip it (once) from a notebook cell** into the same Volume:
 
-Build the folder locally, then import it into the Workspace:
+   ```python
+   %sh
+   cd /Volumes/<catalog>/<schema>/<volume>
+   unzip -o mdm_engine_bundle.zip -d mdm_engine_app
+   ls mdm_engine_app/mdm_engine        # -> conf  notebooks  sql  src
+   ```
 
-```bash
-./scripts/build_databricks_bundle.sh                 # creates dist/mdm_engine/
-databricks workspace import-dir dist/mdm_engine \
-    /Workspace/Users/<you>/mdm_engine --overwrite
-```
+   You now have the folder at
+   `/Volumes/<catalog>/<schema>/<volume>/mdm_engine_app/mdm_engine`.
 
-(Or copy to a Unity Catalog Volume: `databricks fs cp -r dist/mdm_engine \
-dbfs:/Volumes/<cat>/<sch>/<vol>/mdm_engine`.)
+4. **Create the tables** (one time): open
+   `.../mdm_engine_app/mdm_engine/sql/setup_tables.sql`, copy it into a SQL cell/editor and
+   run it. It already targets `pds_auroradsar_prod.schema_informatica` — run as-is.
 
-### A3. UI upload of the ZIP, then unzip
+5. **Run the match** from a Python notebook:
 
-1. Upload `dist/mdm_engine_bundle.zip` to a Volume (Catalog UI) or DBFS.
-2. In a notebook cell: `%sh unzip -o /Volumes/.../mdm_engine_bundle.zip -d /Volumes/.../`.
+   ```python
+   import sys
+   sys.path.insert(0, "/Volumes/<catalog>/<schema>/<volume>/mdm_engine_app/mdm_engine/src")
+   from matching.pipeline import run_country
+   run_country(spark, "MY")   # global from conf/base.json + country from conf/countries/MY.json
+   ```
 
-### Run it (any of A1–A3)
+   `conf/` resolves automatically because it sits next to `src/` inside the unzipped folder.
 
-`notebooks/00_path_setup.py` locates `src/` for notebooks in the folder. From a plain
-notebook you can also do it explicitly:
+> Tip: unzip into a **Volume** (persistent), not `/tmp` or `/databricks/driver` (wiped when
+> the cluster restarts). To keep `conf/` somewhere other than next to `src/`, set
+> `os.environ["MDM_CONF_DIR"] = ".../mdm_engine/conf"` before importing `matching`.
 
-```python
-import sys; sys.path.insert(0, "/Workspace/Users/<you>/mdm_engine/src")
-from matching.pipeline import run_country
-run_country(spark, "MY")   # global from conf/base.json + country from conf/countries/MY.json
-```
+### Alternatives (if you later have CLI or Git access)
 
-`conf/` resolves automatically because it sits next to `src/` in the folder. If you ever
-move `conf/` elsewhere, set `os.environ["MDM_CONF_DIR"]` to its path before importing.
+- **Git Repos**: Workspace → Repos → Add Repo → paste the Git URL, then open
+  `notebooks/01_run_match_country.py` (it runs `%run ./00_path_setup` to wire `sys.path`).
+- **Databricks CLI**: `databricks workspace import-dir dist/mdm_engine /Workspace/Users/<you>/mdm_engine --overwrite`.
 
 ## Option B — Wheel (cluster/job library)
 
