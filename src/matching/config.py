@@ -10,13 +10,29 @@ used by the original notebook; override per environment as needed.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 # Reference shape for new countries: conf/countries/template.json (not loaded at runtime).
 
-DEFAULT_SOURCE_TABLE = "sources_informatica.ufsoperator"
+DEFAULT_SOURCE_TABLE = "sl_bdl_processed_cd_prod.cd.vw_ufsoperator"
 DEFAULT_TARGET_SCHEMA = "pds_auroradsar_prod.schema_informatica"
+
+# Source inputs (see matching.sources). Two Databricks views feed the engine:
+#   - operator ("non-golden"): the population to match; one row per OperatorConcatId,
+#     each carrying its Informatica GoldenRecordId (its group) when already matched.
+#   - golden ("already matched"): the surviving master record per GoldenRecordId
+#     (no OperatorConcatId). Used to preserve groups whose master is absent from the
+#     operator feed (see matching.sources.build_source_population).
+# Each spec is {"format": "delta"|"csv"|"parquet", "table"|"path": ..., "options": {...}}.
+# Keeping them declarative lets a deployment swap Delta tables for CSV/Parquet files
+# without touching engine code.
+DEFAULT_SOURCE = {"format": "delta", "table": DEFAULT_SOURCE_TABLE}
+DEFAULT_GOLDEN_SOURCE = {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden"}
+# Prefix for the synthetic OperatorConcatId given to golden masters that are missing
+# from the operator feed (so their Informatica group is still preserved).
+GOLDEN_MASTER_KEY_PREFIX = "GRID_"
 DEFAULT_ROW_REGISTRY_TABLE = "MDMRowRegistry"
 DEFAULT_ROW_REGISTRY_KEY_COLUMN = "OperatorConcatId"
 DEFAULT_EXACT_MAX_BLOCK_SIZE = 50000
@@ -69,7 +85,18 @@ ENRICHMENT_COLUMN_MAPPINGS = [
     ("ZipCode", "ZipCode"),
 ]
 
-_CONF_DIR = Path(__file__).resolve().parents[2] / "conf" / "countries"
+# conf/ location. Defaults to the repo layout (repo_root/conf) but can be pointed
+# elsewhere via the MDM_CONF_DIR env var — useful on Databricks when the code is
+# installed as a wheel and configs live in a Workspace / DBFS / Volume path.
+_CONF_ROOT = (
+    Path(os.environ["MDM_CONF_DIR"]).resolve()
+    if os.environ.get("MDM_CONF_DIR")
+    else Path(__file__).resolve().parents[2] / "conf"
+)
+_CONF_DIR = _CONF_ROOT / "countries"
+# Master defaults shared by every country (EnrichDate, standardization, match rules,
+# invalid_values, source specs, ...). A country file only carries its overrides.
+_BASE_CONFIG_PATH = _CONF_ROOT / "base.json"
 
 
 def _is_country_config_file(path: Path) -> bool:
@@ -82,8 +109,35 @@ def _is_country_config_file(path: Path) -> bool:
     return path.suffix.lower() == ".json"
 
 
-def load_country_config(country_code: str, conf_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Load conf/countries/{CC}.json. Raises FileNotFoundError if missing."""
+def load_base_config(base_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load the shared master config (conf/base.json). Returns {} if absent."""
+    path = base_path or _BASE_CONFIG_PATH
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text())
+
+
+def _merge_config(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Shallow-merge a country override onto the base master config.
+
+    Top-level keys in the country file replace those from base (a country that sets
+    e.g. its own ``standardization`` or ``exact_match_rules`` fully overrides the base
+    value; keys it omits are inherited). Kept shallow so behaviour stays predictable.
+    """
+    merged = dict(base)
+    merged.update(override)
+    return merged
+
+
+def load_country_config(
+    country_code: str,
+    conf_dir: Optional[Path] = None,
+    base_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Load conf/base.json merged with conf/countries/{CC}.json (country wins).
+
+    Raises FileNotFoundError if the country file is missing.
+    """
     directory = conf_dir or _CONF_DIR
     cc = country_code.upper()
     path = directory / f"{cc}.json"
@@ -92,11 +146,16 @@ def load_country_config(country_code: str, conf_dir: Optional[Path] = None) -> D
             f"Missing country config: {path}. "
             f"Copy conf/countries/template.json to conf/countries/{cc}.json and edit it."
         )
-    return json.loads(path.read_text())
+    base = load_base_config(base_path)
+    return _merge_config(base, json.loads(path.read_text()))
 
 
-def load_all_country_configs(conf_dir: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
-    """Load all conf/countries/*.json files except template.json and _*.json.
+def load_all_country_configs(
+    conf_dir: Optional[Path] = None,
+    base_path: Optional[Path] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Load every conf/countries/*.json (except template.json / _*.json), each merged
+    onto conf/base.json.
 
     Raises FileNotFoundError if the directory is missing or contains no country configs.
     """
@@ -106,11 +165,12 @@ def load_all_country_configs(conf_dir: Optional[Path] = None) -> Dict[str, Dict[
             f"Country config directory not found: {directory}. "
             "Add conf/countries/{CC}.json files (copy from template.json)."
         )
+    base = load_base_config(base_path)
     configs: Dict[str, Dict[str, Any]] = {}
     for path in sorted(directory.glob("*.json")):
         if not _is_country_config_file(path):
             continue
-        configs[path.stem.upper()] = json.loads(path.read_text())
+        configs[path.stem.upper()] = _merge_config(base, json.loads(path.read_text()))
     if not configs:
         raise FileNotFoundError(
             f"No country configs found in {directory}. "
@@ -120,24 +180,68 @@ def load_all_country_configs(conf_dir: Optional[Path] = None) -> Dict[str, Dict[
     return configs
 
 
+def _resolve_source_spec(cfg: Dict[str, Any], key: str, default: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return a source spec dict for the given key.
+
+    Accepts a declarative dict ({"format","table"/"path","options"}) or a bare string
+    (treated as a Delta table name for backward compatibility). Falls back to default.
+    """
+    spec = cfg.get(key, default)
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        return {"format": "delta", "table": spec}
+    return dict(spec)
+
+
+def resolve_country_config(
+    country_code: str,
+    cfg: Optional[Dict[str, Any]] = None,
+    conf_dir: Optional[Path] = None,
+    base_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Resolve the effective config for a country: global from base.json, country-specific
+    from conf/countries/{CC}.json, selected by ``country_code``.
+
+    - ``cfg is None`` (normal path): load conf/base.json + conf/countries/{CC}.json.
+    - ``cfg`` provided: still guarantee the base.json defaults underlie it (base is merged
+      underneath, the caller's keys win), so a partial/overridden cfg never loses global
+      settings. This is what keeps "global from base, country-specific on top" true no
+      matter how run_country is called.
+    """
+    if cfg is None:
+        return load_country_config(country_code, conf_dir=conf_dir, base_path=base_path)
+    return _merge_config(load_base_config(base_path), cfg)
+
+
 def _runtime_cfg(country_code: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     country_path = country_code.lower()
+    target_schema = cfg.get("target_schema", DEFAULT_TARGET_SCHEMA)
+    # Backward compat: a legacy "source_table" string still works as the operator source.
+    source_spec = _resolve_source_spec(cfg, "source", cfg.get("source_table", DEFAULT_SOURCE))
+    golden_source_spec = _resolve_source_spec(cfg, "golden_source", DEFAULT_GOLDEN_SOURCE)
+    source_table = source_spec.get("table") if source_spec else DEFAULT_SOURCE_TABLE
+    filter_condition = cfg.get("filter_condition") or f"CountryCode = '{country_code.upper()}'"
     return {
         **cfg,
-        "source_table": DEFAULT_SOURCE_TABLE,
-        "rowRegistryTable": f"{DEFAULT_TARGET_SCHEMA}.{DEFAULT_ROW_REGISTRY_TABLE}",
+        "target_schema": target_schema,
+        "source": source_spec,
+        "golden_source": golden_source_spec,
+        "source_table": source_table,
+        "filter_condition": filter_condition,
+        "rowRegistryTable": f"{target_schema}.{DEFAULT_ROW_REGISTRY_TABLE}",
         "rowRegistryKeyColumn": DEFAULT_ROW_REGISTRY_KEY_COLUMN,
         "matchLinksTempView": f"tmp_match_links_{country_path}",
-        "ruleResultsTable": f"{DEFAULT_TARGET_SCHEMA}.MDMRuleResults",
-        "ruleEvaluationsTable": f"{DEFAULT_TARGET_SCHEMA}.MDMRuleEvaluations",
-        "matchExclusionsTable": f"{DEFAULT_TARGET_SCHEMA}.MDMMatchExclusions",
-        "enrichedOperatorsTable": f"{DEFAULT_TARGET_SCHEMA}.mdmenrichedoperators",
-        "matchingStateTable": f"{DEFAULT_TARGET_SCHEMA}.MDMMatchingState",
-        "matchLinksTable": f"{DEFAULT_TARGET_SCHEMA}.MDMMatchLinks",
-        "componentLabelsTable": f"{DEFAULT_TARGET_SCHEMA}.MDMComponentLabels",
-        "matchedResultsTable": f"{DEFAULT_TARGET_SCHEMA}.MDMMatchedResults",
-        "goldenIdHistoryTable": f"{DEFAULT_TARGET_SCHEMA}.MDMGoldenIdHistory",
-        "goldenIdSequenceTable": f"{DEFAULT_TARGET_SCHEMA}.MDMGoldenIdSequence",
+        "ruleResultsTable": f"{target_schema}.MDMRuleResults",
+        "ruleEvaluationsTable": f"{target_schema}.MDMRuleEvaluations",
+        "matchExclusionsTable": f"{target_schema}.MDMMatchExclusions",
+        "enrichedOperatorsTable": f"{target_schema}.mdmenrichedoperators",
+        "matchingStateTable": f"{target_schema}.MDMMatchingState",
+        "matchLinksTable": f"{target_schema}.MDMMatchLinks",
+        "componentLabelsTable": f"{target_schema}.MDMComponentLabels",
+        "matchedResultsTable": f"{target_schema}.MDMMatchedResults",
+        "goldenIdHistoryTable": f"{target_schema}.MDMGoldenIdHistory",
+        "goldenIdSequenceTable": f"{target_schema}.MDMGoldenIdSequence",
         "exact_max_block_size": DEFAULT_EXACT_MAX_BLOCK_SIZE,
         "fuzzy_max_block_size": DEFAULT_FUZZY_MAX_BLOCK_SIZE,
         "golden_id_floor": int(cfg.get("golden_id_floor", DEFAULT_GOLDEN_ID_FLOOR)),

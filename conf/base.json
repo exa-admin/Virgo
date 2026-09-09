@@ -1,0 +1,46 @@
+{
+  "target_schema": "pds_auroradsar_prod.schema_informatica",
+  "source": {
+    "format": "delta",
+    "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperator"
+  },
+  "golden_source": {
+    "format": "delta",
+    "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden"
+  },
+  "EnrichDate": true,
+  "priorityMatching": true,
+  "golden_id_floor": 100000000,
+  "preserve_source_golden_groups": true,
+  "allow_source_golden_group_merge": false,
+  "components_max_iterations": 30,
+  "invalid_values": [
+    "",
+    "null",
+    "nan",
+    "na",
+    "n/a",
+    "0",
+    "00",
+    "000",
+    "0000",
+    "dummy",
+    "test"
+  ],
+  "exclude_from_match_filters": [
+    "lower(OperatorName) LIKE '%invalid%'",
+    "lower(OperatorName) LIKE '%dummy%'",
+    "ZipCode IN ('00000', '99999')"
+  ],
+  "standardization": {
+    "name_column": "OperatorName",
+    "city_column": "CityText",
+    "state_column": "StateText",
+    "zip_column": "ZipCode",
+    "address_columns": [
+      "HouseNumberText",
+      "HouseNumberExtensionText",
+      "StreetText"
+    ]
+  }
+}

@@ -15,7 +15,11 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 
 ## High-level pipeline
 
-1. **Load** source (`sources_informatica.ufsoperator` by default) filtered by country.
+1. **Load** source via `matching.sources.build_source_population` (kept separate so the
+   input can be Delta/CSV/Parquet): the operator view (`sl_bdl_processed_cd_prod.cd.vw_ufsoperator`,
+   the population to match) plus the golden view (`…vw_ufsoperatorgoden`, already-matched
+   masters) — golden masters absent from the operator feed are backfilled with a synthetic
+   `OperatorConcatId` (`GRID_<GoldenRecordId>`) so their group is never lost. Filtered by country.
 2. **Enrich** (optional) from `mdmenrichedoperators` when `EnrichDate` is true.
 3. **Row registry** MERGE into `MDMRowRegistry` → assign `MDMRowId` / `record_id`.
 4. **Standardize** match attributes (`c_name`, `c_zip`, `c_address`, soundex/prefix, …).
@@ -89,7 +93,10 @@ from matching.config import load_country_config
 | `MDMMatchedResults` | Output with `golden_id`, `golden_id_source`, `previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `final_match_rule`, flags |
 | `mdmenrichedoperators` | External enrichment (not created by setup SQL) |
 
-Defaults live in `matching.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.schema_informatica`.
+Defaults live in `matching.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.schema_informatica`
+(override per env via `target_schema` in `conf/base.json`). Source views default to
+`sl_bdl_processed_cd_prod.cd.vw_ufsoperator` / `…vw_ufsoperatorgoden` (override via
+`source` / `golden_source` specs; each is `{format: delta|csv|parquet, table|path, options}`).
 
 ## How to run (Databricks)
 
@@ -113,7 +120,7 @@ run_all(spark)
 - Prefer **no GraphFrames / GraphX**.
 - Writes are **country-partitioned Delta slices** (`replaceWhere` / delete-by-country).
 - Match methods are Spark-native (exact keys, Levenshtein, token Jaccard, blocking).
-- Keep config in `conf/countries/{CC}.json` (required; no embedded fallback). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded.
+- Config is layered: `conf/base.json` (cross-country defaults — source specs, `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, …) merged with `conf/countries/{CC}.json` (per-country settings: the **match rules** — `exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules` — plus any base overrides; country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}` country file inherits all base defaults (see `MY.json`). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded. `MDM_CONF_DIR` env var relocates `conf/` (e.g. wheel deploys).
 
 ## Package map
 
@@ -127,7 +134,8 @@ Intended layout:
 
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | Constants, JSON loaders, `_runtime_cfg` |
+| `config.py` | Constants, JSON loaders (`conf/base.json` master + per-country override merge), `_runtime_cfg` |
+| `sources.py` | Source ingestion (delta/csv/parquet) for operator + golden views; `build_source_population` |
 | `utils.py` | Timing, cleaning, similarity, empty schemas, rule conditions |
 | `delta_io.py` | Table requires, overwrite slice, materialize helpers |
 | `standardize.py` | `standardize_input` |

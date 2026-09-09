@@ -16,6 +16,7 @@ from matching.config import (
     SOURCE_GOLDEN_GROUP_RULE_STAGE,
     _runtime_cfg,
     load_all_country_configs,
+    resolve_country_config,
 )
 from matching.delta_io import (
     _clear_country_slice,
@@ -38,6 +39,7 @@ from matching.golden_ids import (
     validate_source_golden_group_assignments,
 )
 from matching.match_pipeline import run_match_pipeline
+from matching.sources import build_source_population
 from matching.source_golden_groups import (
     build_source_golden_group_links,
     materialize_blocked_source_group_links,
@@ -269,7 +271,15 @@ def _enrich_source_data(source_df: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
         )
     return enriched_source
 
-def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> DataFrame:
+def run_country(spark: SparkSession, country_code: str, cfg: Optional[Dict[str, Any]] = None) -> DataFrame:
+    # Config is driven by country_code: global settings come from conf/base.json and
+    # country-specific settings (match rules, any overrides) from conf/countries/{CC}.json.
+    # When a cfg is passed in, base.json defaults are still merged underneath it.
+    cfg = resolve_country_config(country_code, cfg)
+    print(
+        f"Config for {country_code}: global from conf/base.json + "
+        f"country-specific from conf/countries/{country_code.upper()}.json"
+    )
     cfg = _runtime_cfg(country_code, cfg)
     required_tables = {
         cfg["rowRegistryTable"]: ROW_REGISTRY_REQUIRED_COLUMNS,
@@ -364,7 +374,7 @@ def run_country(spark: SparkSession, country_code: str, cfg: Dict[str, Any]) -> 
 
     with timed(f"Country {country_code}: load and standardize"):
         required_columns = collect_required_columns(cfg)
-        source = spark.table(cfg["source_table"]).filter(cfg["filter_condition"])
+        source = build_source_population(spark, country_code=country_code, cfg=cfg)
         source = _enrich_source_data(source, cfg)
         source = _ensure_columns(source, required_columns)
         source = _ensure_row_registry(source, cfg)

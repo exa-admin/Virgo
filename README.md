@@ -52,11 +52,14 @@ Existing deployments: run the `ALTER TABLE … ADD COLUMNS …` and new `CREATE 
 | Path | Role |
 |------|------|
 | `src/matching/` | Match pipeline package (current) |
+| `src/matching/sources.py` | Source ingestion (delta/csv/parquet); operator + golden views |
 | `src/merging/` | Survivorship / merge (future; not present yet) |
 | `src/dq/` | Data quality utilities (e.g. address enrichment) |
-| `conf/countries/{CC}.json` | Per-country match config (required; e.g. `MY.json`) |
+| `conf/base.json` | Cross-country defaults (source specs, standardization, invalid_values, target_schema, …) |
+| `conf/countries/{CC}.json` | Per-country match rules (exact/fuzzy/blocking) + any base overrides (e.g. `MY.json`) |
 | `conf/countries/template.json` | Reference-only shape for new countries (not loaded) |
 | `sql/setup_tables.sql` | Delta DDL for MDM tables |
+| `scripts/build_databricks_bundle.sh` | Build the deployable zip + wheel (see `docs/DEPLOYMENT.md`) |
 | `notebooks/01_run_match_country.py` | Thin Databricks entry notebook |
 | `AGENTS.md` | Instructions for AI/coding sessions |
 | `docs/ARCHITECTURE.md` | Pipeline deep-dive |
@@ -64,7 +67,9 @@ Existing deployments: run the `ALTER TABLE … ADD COLUMNS …` and new `CREATE 
 ## Prerequisites
 
 - Databricks workspace with Delta Lake / Unity Catalog (or compatible metastore)
-- Source table `sources_informatica.ufsoperator` (or override in config / `_runtime_cfg` defaults)
+- Source views `sl_bdl_processed_cd_prod.cd.vw_ufsoperator` (operators to match) and
+  `…vw_ufsoperatorgoden` (golden masters) — configurable as delta/csv/parquet via
+  `source` / `golden_source` in `conf/base.json` (see `src/matching/sources.py`)
 - Optional enrichment table `…mdmenrichedoperators` when `EnrichDate` is true
 - PySpark is provided by **Databricks Runtime** — local `pip install` is optional (for editing / type-checking only)
 
@@ -84,12 +89,16 @@ import sys
 sys.path.append("/Workspace/Repos/Engine/src")  # adjust path
 
 from pyspark.sql import SparkSession
-from matching.config import load_country_config
 from matching.pipeline import run_country
 
 spark = SparkSession.builder.getOrCreate()
-cfg = load_country_config("MY")
-run_country(spark, "MY", cfg)
+# Config is resolved from the country code: global settings from conf/base.json,
+# country-specific rules/overrides from conf/countries/MY.json.
+run_country(spark, "MY")
+
+# To tweak config in-code, pass a partial cfg (base.json defaults still apply underneath):
+# from matching.config import load_country_config
+# run_country(spark, "MY", load_country_config("MY"))
 ```
 
 Or open `notebooks/01_run_match_country.py` and run all cells.
@@ -103,7 +112,9 @@ run_all(spark)  # loads conf/countries/*.json
 
 ## Configuration overview
 
-Each country **must** have `conf/countries/{CC}.json`. Loaders raise `FileNotFoundError` if it is missing (no embedded fallback). To add a country, copy `conf/countries/template.json` → e.g. `SG.json` and edit — `template.json` and `_*.json` are skipped by `load_all_country_configs`.
+Config is **layered**: `conf/base.json` holds the cross-country defaults (source/golden specs, `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, …), and each `conf/countries/{CC}.json` holds that country's **match rules** (`exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules`) plus any base overrides, merged on top of base (country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. Loaders raise `FileNotFoundError` if the country file is missing. To add a country, copy `conf/countries/template.json` → e.g. `SG.json` — `template.json` and `_*.json` are skipped by `load_all_country_configs`.
+
+To deploy to Databricks (zip bundle or wheel), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 Country JSON (e.g. `conf/countries/MY.json`) controls:
 

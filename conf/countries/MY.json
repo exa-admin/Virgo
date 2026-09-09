@@ -1,40 +1,4 @@
 {
-  "filter_condition": "CountryCode = 'MY'",
-  "EnrichDate": true,
-  "priorityMatching": true,
-  "golden_id_floor": 100000000,
-  "preserve_source_golden_groups": true,
-  "allow_source_golden_group_merge": false,
-  "components_max_iterations": 30,
-  "invalid_values": [
-    "",
-    "null",
-    "nan",
-    "na",
-    "n/a",
-    "0",
-    "00",
-    "000",
-    "0000",
-    "dummy",
-    "test"
-  ],
-  "exclude_from_match_filters": [
-    "lower(OperatorName) LIKE '%invalid%'",
-    "lower(OperatorName) LIKE '%dummy%'",
-    "ZipCode IN ('00000', '99999')"
-  ],
-  "standardization": {
-    "name_column": "OperatorName",
-    "city_column": "CityText",
-    "state_column": "StateText",
-    "zip_column": "ZipCode",
-    "address_columns": [
-      "HouseNumberText",
-      "HouseNumberExtensionText",
-      "StreetText"
-    ]
-  },
   "exact_match_rules": [
     {
       "rule_name": "Exact_OperatorName_Zip",
@@ -60,7 +24,7 @@
       "priority": 20,
       "columns": [
         {
-          "column": "SAPCustomerID",
+          "column": "SAPCustomerId",
           "method": "exact_not_empty",
           "min_length": 3
         }

@@ -5,7 +5,8 @@
 -- Parameterize catalog/schema per environment before running, e.g.:
 --   REPLACE pds_auroradsar_prod.schema_informatica WITH <catalog>.<schema>
 --
--- Source table (sources_informatica.ufsoperator) and enrichment table
+-- Source views (sl_bdl_processed_cd_prod.cd.vw_ufsoperator and ...vw_ufsoperatorgoden,
+-- configured via conf/base.json source/golden_source) and enrichment table
 -- (mdmenrichedoperators) are externally populated and are NOT created here.
 -- =============================================================================
 
@@ -293,7 +294,8 @@ COMMENT 'Matched results per country (schema widened at write via mergeSchema)';
 
 -- -----------------------------------------------------------------------------
 -- Externally populated (not created here):
---   sources_informatica.ufsoperator          — source operators
+--   sl_bdl_processed_cd_prod.cd.vw_ufsoperator      — source operators (population)
+--   sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden — golden masters (already matched)
 --   pds_auroradsar_prod.schema_informatica.mdmenrichedoperators
 --       Expected join key: OperatorConcatId
 --       Columns used when EnrichDate=true (see ENRICHMENT_COLUMN_MAPPINGS):
