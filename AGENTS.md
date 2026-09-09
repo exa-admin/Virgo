@@ -120,7 +120,7 @@ run_all(spark)
 - Prefer **no GraphFrames / GraphX**.
 - Writes are **country-partitioned Delta slices** (`replaceWhere` / delete-by-country).
 - Match methods are Spark-native (exact keys, Levenshtein, token Jaccard, blocking).
-- Config is layered: `conf/base.json` (master defaults shared by all countries — source specs, `EnrichDate`, `standardization`, match rules, `invalid_values`, `target_schema`, …) merged with `conf/countries/{CC}.json` (per-country **overrides only**; country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}` country file inherits all base defaults (see `MY.json`). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded. `MDM_CONF_DIR` env var relocates `conf/` (e.g. wheel deploys).
+- Config is layered: `conf/base.json` (cross-country defaults — source specs, `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, …) merged with `conf/countries/{CC}.json` (per-country settings: the **match rules** — `exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules` — plus any base overrides; country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}` country file inherits all base defaults (see `MY.json`). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded. `MDM_CONF_DIR` env var relocates `conf/` (e.g. wheel deploys).
 
 ## Package map
 

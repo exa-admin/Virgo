@@ -1,8 +1,9 @@
 {
   "_comment": "REFERENCE ONLY -- not loaded by load_country_config / load_all_country_configs. Copy to conf/countries/{CC}.json (e.g. SG.json) to register a new country.",
-  "_how_it_works": "Every country config is merged ON TOP of conf/base.json (the master config). A country file only needs the keys it OVERRIDES; everything else (EnrichDate, standardization, match rules, invalid_values, source/golden_source specs, target_schema, ...) is inherited from base.json. An empty object {} is a valid country file that inherits all base defaults (see MY.json).",
+  "_how_it_works": "A country config is merged ON TOP of conf/base.json. base.json holds the cross-country defaults (EnrichDate, standardization, invalid_values, exclude_from_match_filters, golden_id_floor, source/golden_source specs, target_schema, ...). The COUNTRY file holds the country-specific MATCH RULES (exact_match_rules, default_fuzzy_blocking, fuzzy_match_rules) plus any base overrides. Copy the rules from an existing country (e.g. MY.json) as a starting point.",
   "_filter_condition": "Optional. Defaults to \"CountryCode = '<CC>'\" derived from the file name. Override only for non-standard slicing.",
   "filter_condition": "CountryCode = 'XX'",
+  "_match_rules": "Required per country -- define exact_match_rules / default_fuzzy_blocking / fuzzy_match_rules here (see MY.json).",
   "_source_override_example": "Override the input for one country (e.g. read Parquet files instead of the shared Delta views). format is one of delta | csv | parquet; use 'table' for delta or 'path' for csv/parquet, plus optional Spark reader 'options'.",
   "source": {
     "format": "parquet",

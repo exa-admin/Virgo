@@ -55,8 +55,8 @@ Existing deployments: run the `ALTER TABLE … ADD COLUMNS …` and new `CREATE 
 | `src/matching/sources.py` | Source ingestion (delta/csv/parquet); operator + golden views |
 | `src/merging/` | Survivorship / merge (future; not present yet) |
 | `src/dq/` | Data quality utilities (e.g. address enrichment) |
-| `conf/base.json` | Master config shared by every country (source specs, rules, standardization, …) |
-| `conf/countries/{CC}.json` | Per-country **overrides only** (merged onto base; e.g. `MY.json`) |
+| `conf/base.json` | Cross-country defaults (source specs, standardization, invalid_values, target_schema, …) |
+| `conf/countries/{CC}.json` | Per-country match rules (exact/fuzzy/blocking) + any base overrides (e.g. `MY.json`) |
 | `conf/countries/template.json` | Reference-only shape for new countries (not loaded) |
 | `sql/setup_tables.sql` | Delta DDL for MDM tables |
 | `scripts/build_databricks_bundle.sh` | Build the deployable zip + wheel (see `docs/DEPLOYMENT.md`) |
@@ -108,7 +108,7 @@ run_all(spark)  # loads conf/countries/*.json
 
 ## Configuration overview
 
-Config is **layered**: `conf/base.json` holds the master defaults shared by every country (source/golden specs, `EnrichDate`, `standardization`, match rules, `invalid_values`, `target_schema`, …), and each `conf/countries/{CC}.json` carries only that country's **overrides**, merged on top of base (country wins). `filter_condition` defaults to `CountryCode = '<CC>'`, so a country with no special rules can be an empty `{}` (see `MY.json`). Loaders raise `FileNotFoundError` if the country file is missing. To add a country, copy `conf/countries/template.json` → e.g. `SG.json` — `template.json` and `_*.json` are skipped by `load_all_country_configs`.
+Config is **layered**: `conf/base.json` holds the cross-country defaults (source/golden specs, `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, …), and each `conf/countries/{CC}.json` holds that country's **match rules** (`exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules`) plus any base overrides, merged on top of base (country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. Loaders raise `FileNotFoundError` if the country file is missing. To add a country, copy `conf/countries/template.json` → e.g. `SG.json` — `template.json` and `_*.json` are skipped by `load_all_country_configs`.
 
 To deploy to Databricks (zip bundle or wheel), see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
