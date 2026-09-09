@@ -194,6 +194,26 @@ def _resolve_source_spec(cfg: Dict[str, Any], key: str, default: Optional[Dict[s
     return dict(spec)
 
 
+def resolve_country_config(
+    country_code: str,
+    cfg: Optional[Dict[str, Any]] = None,
+    conf_dir: Optional[Path] = None,
+    base_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Resolve the effective config for a country: global from base.json, country-specific
+    from conf/countries/{CC}.json, selected by ``country_code``.
+
+    - ``cfg is None`` (normal path): load conf/base.json + conf/countries/{CC}.json.
+    - ``cfg`` provided: still guarantee the base.json defaults underlie it (base is merged
+      underneath, the caller's keys win), so a partial/overridden cfg never loses global
+      settings. This is what keeps "global from base, country-specific on top" true no
+      matter how run_country is called.
+    """
+    if cfg is None:
+        return load_country_config(country_code, conf_dir=conf_dir, base_path=base_path)
+    return _merge_config(load_base_config(base_path), cfg)
+
+
 def _runtime_cfg(country_code: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
     country_path = country_code.lower()
     target_schema = cfg.get("target_schema", DEFAULT_TARGET_SCHEMA)

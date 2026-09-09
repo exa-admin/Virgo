@@ -47,6 +47,7 @@ run_mode = dbutils.widgets.get("run_mode")
 if run_mode == "all":
     run_all(spark)
 else:
-    cfg = load_country_config(country_code)
-    result_df = run_country(spark, country_code, cfg)
+    # Config is resolved from country_code: global settings from conf/base.json,
+    # country-specific rules/overrides from conf/countries/{country_code}.json.
+    result_df = run_country(spark, country_code)
     display(result_df)

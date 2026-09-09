@@ -89,12 +89,16 @@ import sys
 sys.path.append("/Workspace/Repos/Engine/src")  # adjust path
 
 from pyspark.sql import SparkSession
-from matching.config import load_country_config
 from matching.pipeline import run_country
 
 spark = SparkSession.builder.getOrCreate()
-cfg = load_country_config("MY")
-run_country(spark, "MY", cfg)
+# Config is resolved from the country code: global settings from conf/base.json,
+# country-specific rules/overrides from conf/countries/MY.json.
+run_country(spark, "MY")
+
+# To tweak config in-code, pass a partial cfg (base.json defaults still apply underneath):
+# from matching.config import load_country_config
+# run_country(spark, "MY", load_country_config("MY"))
 ```
 
 Or open `notebooks/01_run_match_country.py` and run all cells.
