@@ -28,21 +28,50 @@ Build both:
    These are set in `conf/base.json` under `source` / `golden_source`. To read files
    instead of tables, change the spec (see "Swapping the source format" below).
 
-## Option A — ZIP bundle (upload & import)
+## Option A — Deploy as a folder (recommended)
 
-1. Upload `mdm_engine_bundle.zip` to the Workspace (or a Volume/DBFS) and unzip so you
-   have a folder like `.../mdm_engine/` containing `src/`, `conf/`, `notebooks/`, `sql/`.
-2. In a notebook, put `src/` on the path and run — `notebooks/00_path_setup.py` does this
-   automatically, or manually:
+The whole project lives as one folder in Databricks; notebooks add `src/` to `sys.path`
+and `conf/` resolves next to it. Pick whichever upload method you have access to.
 
-   ```python
-   import sys; sys.path.insert(0, "/Workspace/.../mdm_engine/src")
-   from matching.config import load_country_config
-   from matching.pipeline import run_country
-   run_country(spark, "MY", load_country_config("MY"))
-   ```
+### A1. Git Repos (no build step)
 
-   `conf/` resolves automatically because it sits next to `src/` in the bundle.
+1. In Databricks: **Workspace → Repos → Add Repo**, paste this repo's Git URL. You now
+   have a folder like `/Workspace/Repos/<you>/<repo>/` containing `src/ conf/ sql/ notebooks/`.
+2. Open `notebooks/01_run_match_country.py`. It runs `%run ./00_path_setup` first, which
+   finds `src/` and adds it to `sys.path` automatically. Set the `country_code` widget and
+   run all cells. (Pull to update; branches/PRs work as usual.)
+
+### A2. Databricks CLI — upload the folder
+
+Build the folder locally, then import it into the Workspace:
+
+```bash
+./scripts/build_databricks_bundle.sh                 # creates dist/mdm_engine/
+databricks workspace import-dir dist/mdm_engine \
+    /Workspace/Users/<you>/mdm_engine --overwrite
+```
+
+(Or copy to a Unity Catalog Volume: `databricks fs cp -r dist/mdm_engine \
+dbfs:/Volumes/<cat>/<sch>/<vol>/mdm_engine`.)
+
+### A3. UI upload of the ZIP, then unzip
+
+1. Upload `dist/mdm_engine_bundle.zip` to a Volume (Catalog UI) or DBFS.
+2. In a notebook cell: `%sh unzip -o /Volumes/.../mdm_engine_bundle.zip -d /Volumes/.../`.
+
+### Run it (any of A1–A3)
+
+`notebooks/00_path_setup.py` locates `src/` for notebooks in the folder. From a plain
+notebook you can also do it explicitly:
+
+```python
+import sys; sys.path.insert(0, "/Workspace/Users/<you>/mdm_engine/src")
+from matching.pipeline import run_country
+run_country(spark, "MY")   # global from conf/base.json + country from conf/countries/MY.json
+```
+
+`conf/` resolves automatically because it sits next to `src/` in the folder. If you ever
+move `conf/` elsewhere, set `os.environ["MDM_CONF_DIR"]` to its path before importing.
 
 ## Option B — Wheel (cluster/job library)
 

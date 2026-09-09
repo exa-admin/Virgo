@@ -22,8 +22,9 @@ echo "== Staging bundle =="
 cp -r src conf sql notebooks "$STAGE/"
 cp README.md AGENTS.md "$STAGE/" 2>/dev/null || true
 cp docs/DEPLOYMENT.md "$STAGE/" 2>/dev/null || true
-# Drop caches from the staged copy.
+# Drop caches / build metadata from the staged copy.
 find "$STAGE" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+find "$STAGE" -type d -name '*.egg-info' -prune -exec rm -rf {} + 2>/dev/null || true
 
 echo "== Zipping bundle =="
 ( cd "$DIST" && zip -qr mdm_engine_bundle.zip mdm_engine )
