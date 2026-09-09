@@ -15,7 +15,7 @@ flowchart TD
   D --> E[standardize_input<br/>c_name / c_zip / c_address / ...]
   E --> F[Config + table exclusions]
   F --> G[Matchable population]
-  G --> H[run_match_pipeline<br/>priority waterfall]
+  G --> H[run_match_waterfall<br/>priority waterfall]
 
   H --> H1[Exact rules<br/>star edges + block caps]
   H --> H2[Fuzzy rules<br/>blocking + similarity]
@@ -31,15 +31,15 @@ flowchart TD
   BD --> L
   BF -->|yes| L
   L[MDMMatchLinks<br/>country replaceWhere]
-  L --> M[connected_components_native<br/>min-label iterations]
+  L --> M[graph.connected_components<br/>min-label iterations]
   M --> N[MDMComponentLabels]
   N --> BT{component holds > 1<br/>Informatica id?}
   BT -->|yes, merges disallowed| BR[Seeded re-labelling<br/>drop transitive bridges<br/>rewrite MDMMatchLinks]
   BR --> BL[MDMRuleResults<br/>999_Blocked_Source_GoldenRecordId_Merge]
   BR --> O
   BT -->|no| O
-  O[_build_final_golden_ids<br/>Informatica id > prior engine id > mint]
-  O --> V[validate_source_golden_group_assignments<br/>fail fast]
+  O[assign_golden_ids<br/>Informatica id > prior engine id > mint]
+  O --> V[validate_group_assignments<br/>fail fast]
   E --> O
   S[(MDMGoldenIdSequence)] --> O
   O --> R[(MDMRowRegistry<br/>MDMGoldenId crosswalk)]
@@ -71,9 +71,9 @@ For each fuzzy rule:
 
 ## Connected components
 
-`connected_components_native` seeds `golden_id = record_id`, then iteratively propagates the **minimum** neighbour label through a bidirectional edge list, writing each iteration to `MDMComponentLabels` until convergence or `max_iterations`.
+`graph.connected_components` seeds `golden_id = record_id`, then iteratively propagates the **minimum** neighbour label through a bidirectional edge list, writing each iteration to `MDMComponentLabels` until convergence or `max_iterations`.
 
-`connected_components_native` raises if the graph has not converged within `components_max_iterations` (default 30); partial labels are never used.
+`graph.connected_components` raises if the graph has not converged within `components_max_iterations` (default 30); partial labels are never used.
 
 ## Golden IDs (Informatica continuity)
 
@@ -91,11 +91,11 @@ not part of an existing grouping get a new golden id.** Concretely:
 
 Engine-minted ids are of the same shape (BIGINT), globally unique, disjoint from
 Informatica's range, and stable across runs.
-Implementation: `source_golden_groups.py` (hard links), `golden_ids.py` (selection),
+Implementation: `graph.py` (hard links + components), `golden_ids.py` (selection),
 state in `MDMRowRegistry` (crosswalk), `MDMGoldenIdSequence` (allocator) and
 `MDMGoldenIdHistory` (XREF).
 
-### Source golden groups as hard links (`source_golden_groups.py`)
+### Source golden groups as hard links (`graph.py`)
 
 With `preserve_source_golden_groups` (default `true`):
 
@@ -123,7 +123,7 @@ Cross-group merges (`allow_source_golden_group_merge`, MY default `false`):
   different labels are dropped; each label is then exactly one connected component
   (stage `labels_source_groups_resolved`). `MDMMatchLinks` is rewritten without the dropped
   edges. Unlabelled records in such a component are impossible; a non-converged propagation
-  raises like `connected_components_native`.
+  raises like `graph.connected_components`.
 - Every dropped edge is written to `MDMRuleResults` stage
   `999_Blocked_Source_GoldenRecordId_Merge` (`RuleType = blocked`,
   `blocked_source_group_merge = true`, `src_source_golden_id` / `dst_source_golden_id` = the
@@ -136,7 +136,7 @@ migration cut-over and downstream crosswalks) at the cost of leaving true duplic
 Informatica had already separated as two golden records. `true` de-duplicates them but
 retires one Informatica id per merge (traceable in `MDMGoldenIdHistory`).
 
-### Registry crosswalk (`_ensure_row_registry`)
+### Registry crosswalk (`pipeline._attach_row_registry`)
 
 - `GoldenRecordId` arrives as a numeric **string**. Values are trimmed and cast to BIGINT;
   a non-blank value that is not an integer string (`^[0-9]+$`) **fails the run** so no id is
@@ -149,7 +149,7 @@ retires one Informatica id per merge (traceable in `MDMGoldenIdHistory`).
   `MDMGoldenIdAssignedDate` store the engine's assignment per row. The assigned date only
   changes when the id changes.
 
-### Selection per component (`_build_final_golden_ids`)
+### Selection per component (`assign_golden_ids`)
 
 For each connected component (`TempClusterId` = min `record_id`, purely internal):
 
@@ -168,7 +168,7 @@ For each connected component (`TempClusterId` = min `record_id`, purely internal
    `TempClusterId` order, where `base = max(golden_id_floor, sequence high-water mark,
    max(SourceGoldenRecordId)+1, max(MDMGoldenId)+1)` over the whole registry. The range is
    reserved by a conditional MERGE on `MDMGoldenIdSequence` and read back, so a concurrent
-   run cannot hand out the same numbers. `SYNTHETIC_GOLDEN_ID_OFFSET` is deprecated.
+   run cannot hand out the same numbers.
 
 All ranking is deterministic → identical input yields identical ids. Every id is the
 golden id of at most one component per run. With preserved source groups the claim step
@@ -181,7 +181,7 @@ construction); it only arbitrates prior **engine** ids whose clusters split.
 (Sep 2026, `SELECT max(GoldenRecordId) FROM sl_bdl_processed_cd_prod.cd.vw_ufsoperator`) and
 keeps growing slowly for countries Informatica still serves; 1e8 leaves 10x headroom while
 keeping engine ids 9 digits. To change it: set the **same** value in every
-`conf/countries/*.json` (and the seed in `sql/setup_tables.sql`), and only ever **raise** it —
+`src/matching/conf/countries/*.json` (and the seed in `sql/setup_tables.sql`), and only ever **raise** it —
 the allocator takes `max(floor, sequence high-water mark, …)`, so lowering has no effect on an
 existing sequence and would only confuse readers.
 
@@ -206,7 +206,7 @@ Before matching (`validate_golden_id_space`):
   country config) if this fires.
 - No `ENGINE`-sourced `MDMGoldenId` equals any `SourceGoldenRecordId` in the registry.
 
-After golden id selection, before any write-back (`validate_source_golden_group_assignments`,
+After golden id selection, before any write-back (`validate_group_assignments`,
 only with `preserve_source_golden_groups`): for every Informatica id in the country, all its
 records are in exactly one component, that component's id is Informatica-sourced (never
 minted), and — unless merges are allowed — equals the Informatica id itself. A violation

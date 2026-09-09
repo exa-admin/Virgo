@@ -1,127 +1,126 @@
-# Deploying the MDM Match engine to Databricks
+# Deploying the MDM match engine to Databricks
 
-The engine is Databricks-oriented: PySpark + Delta Lake are provided by the Databricks
-Runtime. Two supported deployment shapes are produced by
-`scripts/build_databricks_bundle.sh` (outputs land in `dist/`):
-
-| Artifact | Use it when |
-|----------|-------------|
-| `mdm_engine_bundle.zip` | You want to upload the whole project (code + `conf/` + `sql/` + `notebooks/`) and run it as-is. Simplest. |
-| `mdm_engine-<ver>-py3-none-any.whl` | You want the engine installed as a cluster/job **library**; configs live separately (set `MDM_CONF_DIR`). |
-
-Build both:
+One artifact: a wheel. PySpark and Delta come from the Databricks Runtime, so the wheel has
+no dependencies of its own, and the country configs ship inside it.
 
 ```bash
-./scripts/build_databricks_bundle.sh
+./scripts/build_wheel.sh
+# -> dist/mdm_engine-0.1.0-py3-none-any.whl
 ```
 
-## One-time setup (either shape)
+## One-time setup
 
-1. Create the Delta tables: run `sql/setup_tables.sql` (SQL editor or a notebook cell). It
-   already targets `pds_auroradsar_prod.schema_informatica`, which is also the
-   `target_schema` in `conf/base.json` — run it as-is; no edits needed. (Only change that
-   name, in both places, if your workspace genuinely uses a different catalog/schema.)
-2. Confirm the source views are readable:
-   - `sl_bdl_processed_cd_prod.cd.vw_ufsoperator` (operator / population to match)
-   - `sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden` (golden / already-matched masters)
+1. **Create the tables.** Run [`sql/setup_tables.sql`](../sql/setup_tables.sql) in a SQL
+   editor or notebook cell. It already targets `pds_auroradsar_prod.schema_informatica`,
+   which is also the `target_schema` in `conf/base.json` — run it as-is. Change that name
+   in both places only if your workspace genuinely uses a different catalog/schema.
 
-   These are set in `conf/base.json` under `source` / `golden_source`. To read files
-   instead of tables, change the spec (see "Swapping the source format" below).
+2. **Check the source views are readable:**
+   - `sl_bdl_processed_cd_prod.cd.vw_ufsoperator` — operators to match
+   - `sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden` — golden masters
 
-## Option A — Deploy as a folder via the Workspace Import UI (no Volume, no CLI, no Git)
+   Both are set in `conf/base.json` under `source` / `golden_source`.
 
-The whole project lives as one folder in your Workspace; the run notebook sits next to
-`src/`, adds it to `sys.path`, and `conf/` resolves next to it.
+## Install the wheel
 
-1. **Build the bundle locally** (once): `./scripts/build_databricks_bundle.sh` →
-   `dist/mdm_engine_bundle.zip`.
+Upload `mdm_engine-<version>-py3-none-any.whl` to a UC Volume (Catalog → your volume →
+**Upload to this volume**), then either:
 
-2. **Import the zip into your Workspace:**
-   - Databricks sidebar → **Workspace → Users → `<your user>`**.
-   - Click the **⋮ (kebab)** on your user folder (or right-click) → **Import**.
-   - In the dialog choose **File**, drop in `mdm_engine_bundle.zip`, and click **Import**.
-   - Databricks expands the archive into a folder (`mdm_engine/`) containing
-     `src/ conf/ sql/ notebooks/`. The engine modules (`matching/`, `dq/`) and `conf/*.json`
-     land as **Workspace files** (importable); the `notebooks/*.py` become **notebooks**.
+- **Cluster library** — Compute → your cluster → Libraries → Install new → Python whl →
+  point at the Volume path. Every notebook and job on that cluster can then
+  `from matching import run_country`.
+- **Job library** — attach it to the job's task instead, so the version is pinned per job.
+- **Notebook-scoped** — `%pip install /Volumes/<cat>/<sch>/<vol>/mdm_engine-0.1.0-py3-none-any.whl`
+  as the first cell. Good for trying a new build without touching the cluster.
 
-   This needs Workspace Files, which is on by default in current Databricks. Non-notebook
-   files import as files because they lack the `# Databricks notebook source` header.
+Add the enrichment dependencies only if you use `src/dq`:
+`%pip install "mdm-engine[dq]"` (or install `pandas` and `requests` on the cluster).
 
-3. **Create the tables** (one time): open `mdm_engine/sql/setup_tables.sql`, copy it into a
-   SQL editor/cell and run it. It already targets `pds_auroradsar_prod.schema_informatica`
-   — run as-is.
+## Run
 
-4. **Run one country:** open `mdm_engine/notebooks/01_run_match_country.py` and set widgets:
-   - `src_path` = **blank** — it auto-resolves `src/` because the notebook sits next to it
-     in the same Workspace folder (e.g. `/Workspace/Users/<you>/mdm_engine/src`).
-   - `country_code` = `MY`, `run_mode` = `country`.
+### Notebook
 
-   Run all cells → it calls `run_country(spark, "MY")` and displays the results. `conf/` is
-   found automatically next to `src/`.
+Import [`notebooks/run_match.py`](../notebooks/run_match.py) into your Workspace
+(Workspace → ⋮ → Import → File). Set the `countries` widget to `MY`, `MY,SG` or `ALL` and
+run all cells. It prints a per-country summary and shows the results.
 
-   Or, from any notebook cell without the entry notebook:
+### Any notebook cell
 
-   ```python
-   import sys
-   sys.path.insert(0, "/Workspace/Users/<you>/mdm_engine/src")
-   from matching.pipeline import run_country
-   run_country(spark, "MY")   # global from conf/base.json + country from conf/countries/MY.json
-   ```
+```python
+from matching import run_country, run_all
 
-> If your workspace imports the whole zip as notebooks (older workspaces without Workspace
-> Files), the engine modules won't be importable. In that case use a **Volume** upload
-> (below) or **Repos**/**CLI**.
-
-### Alternatives
-
-- **Volume upload:** upload `mdm_engine_bundle.zip` to a UC Volume (**Catalog → Volume →
-  Upload to this volume**), unzip in a `%sh` cell
-  (`unzip -o /Volumes/<cat>/<sch>/<vol>/mdm_engine_bundle.zip -d /Volumes/<cat>/<sch>/<vol>/mdm_engine_app`),
-  import just `01_run_match_country.py` into the Workspace, and set its `src_path` widget to
-  `.../mdm_engine_app/mdm_engine/src` (a notebook can't execute from a Volume, but it can
-  import code from one). Unzip into a Volume — not `/tmp` or `/databricks/driver`, which are
-  wiped on restart.
-- **Git Repos:** Workspace → Repos → Add Repo → paste the Git URL, open
-  `notebooks/01_run_match_country.py`, leave `src_path` blank (auto-resolves).
-- **Databricks CLI:** `databricks workspace import-dir dist/mdm_engine /Workspace/Users/<you>/mdm_engine --overwrite`.
-
-## Option B — Wheel (cluster/job library)
-
-1. Install `mdm_engine-<ver>-py3-none-any.whl` on the cluster or as a job library.
-2. Upload the `conf/` folder somewhere readable (Workspace/Volume/DBFS) and tell the
-   engine where it is via an environment variable **before importing**:
-
-   ```python
-   import os
-   os.environ["MDM_CONF_DIR"] = "/Volumes/<cat>/<sch>/<vol>/mdm_engine/conf"
-   from matching.pipeline import run_country, run_all
-   run_country(spark, "MY")   # one country
-   # or every country in conf/countries/: run_all(spark)
-   ```
-
-   (The wheel does not bundle `conf/`; `MDM_CONF_DIR` points the loader at it. Without
-   it, the loader falls back to the repo-relative `conf/`.)
-
-## Configuration model
-
-- `conf/base.json` — cross-country defaults (source specs, `EnrichDate`, `standardization`,
-  `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, ...).
-- `conf/countries/{CC}.json` — per-country **match rules** (`exact_match_rules`,
-  `default_fuzzy_blocking`, `fuzzy_match_rules`) plus any base overrides; merged on top of
-  base (country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. Add a country
-  by copying `conf/countries/template.json` (or an existing country like `MY.json`) to
-  `{CC}.json` and editing its rules.
-
-## Swapping the source format
-
-`source` / `golden_source` are declarative, so no code change is needed to move from
-Delta tables to files:
-
-```json
-"source":        { "format": "parquet", "path": "/Volumes/cat/sch/vol/operator/" },
-"golden_source": { "format": "csv", "path": "/Volumes/cat/sch/vol/golden/",
-                   "options": { "header": "true", "multiLine": "true" } }
+run_country(spark, "MY")   # one country, returns its MDMMatchedResults slice
+run_all(spark)             # every country with a config
+run_all(spark, ["MY", "SG"])
 ```
 
-Supported formats: `delta` (use `table` or `path`), `csv`, `parquet`. Reading is isolated
-in `src/matching/sources.py`; the rest of the engine is unaffected.
+### Scheduled job (no notebook)
+
+Create a job with a **Python wheel task**:
+
+| Field | Value |
+|---|---|
+| Package name | `mdm_engine` |
+| Entry point | `mdm-match` |
+| Parameters | `["--country", "MY"]` — or `["--all"]`, or `["--country","MY","--country","SG"]` |
+
+`mdm-match --list` prints the configured countries.
+
+## Changing configs without rebuilding
+
+The wheel bundles `conf/`, which is what makes an install runnable as-is. To point the
+engine at configs you can edit in place, upload the folder (holding `base.json` and
+`countries/`) and set `MDM_CONF_DIR` **before importing**:
+
+```python
+import os
+os.environ["MDM_CONF_DIR"] = "/Volumes/<cat>/<sch>/<vol>/mdm_conf"
+from matching import run_country
+run_country(spark, "MY")
+```
+
+The run notebook has a `conf_dir` widget for the same thing, and the CLI has
+`--conf-dir`. Whatever you use, the bundled configs stay the fallback.
+
+Rule changes are the usual reason to override; for anything the engine has to be taught,
+rebuild the wheel.
+
+## Adding a country
+
+1. Copy `src/matching/conf/countries/template.json` (or `MY.json`) to `{CC}.json`.
+2. Edit its `exact_match_rules`, `default_fuzzy_blocking` and `fuzzy_match_rules`.
+3. Rebuild the wheel (or drop the file into your `MDM_CONF_DIR` folder).
+4. Run it: `run_country(spark, "<CC>")`.
+
+`template.json` and any `_*.json` are skipped, so they never run as a country.
+
+Keep `golden_id_floor` identical in every country config, and only ever raise it — the
+engine's minted ids have to stay disjoint from the range Informatica can still reach.
+
+## What a run writes
+
+Everything is a country slice, so re-running one country is safe and idempotent.
+
+| Table | Contents |
+|---|---|
+| `MDMRowRegistry` | Stable `MDMRowId` per country + operator key; golden id crosswalk |
+| `MDMGoldenIdSequence` | High-water mark for engine-minted ids (one global row) |
+| `MDMGoldenIdHistory` | Append-only old → new id remaps per run (`MERGE` / `SPLIT`) |
+| `MDMRuleResults` | Accepted edges per rule stage, incl. blocked Informatica-group bridges |
+| `MDMRuleEvaluations` | Every fuzzy candidate pair and its scores, matched or not |
+| `MDMMatchExclusions` | Stewardship "do not match" keys (you populate this) |
+| `MDMMatchingState` | Intermediate id sets for the waterfall |
+| `MDMMatchLinks` | The final match graph |
+| `MDMComponentLabels` | Component labels per propagation iteration |
+| `MDMMatchedResults` | The output |
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `Required table … does not exist` | `sql/setup_tables.sql` has not been run in this environment |
+| `Table … is missing required columns` | Tables were created from an older setup SQL — re-run it |
+| `Missing country config: …` | No `countries/{CC}.json`; copy `template.json` |
+| `did not converge within N iterations` | A match chain is longer than the budget — raise `components_max_iterations` |
+| `Informatica golden groupings … would not be preserved` | A safety check fired; nothing was written. Inspect `MDMMatchLinks` / `MDMComponentLabels` for the country |
+| `Informatica SourceGoldenRecordId values reach …` | Informatica has entered the engine id range — raise `golden_id_floor` everywhere |

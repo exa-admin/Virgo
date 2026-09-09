@@ -6,7 +6,7 @@
 --   REPLACE pds_auroradsar_prod.schema_informatica WITH <catalog>.<schema>
 --
 -- Source views (sl_bdl_processed_cd_prod.cd.vw_ufsoperator and ...vw_ufsoperatorgoden,
--- configured via conf/base.json source/golden_source) and enrichment table
+-- configured via src/matching/conf/base.json source/golden_source) and enrichment table
 -- (mdmenrichedoperators) are externally populated and are NOT created here.
 -- =============================================================================
 

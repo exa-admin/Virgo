@@ -63,11 +63,12 @@ CANDIDATE_COLUMNS = [
 
 
 def _get_api_key(api_key: Optional[str] = None) -> str:
-    key = "AIzaSyDCp0EjPoJbUOijoOvF-lra_OfADpxoU9w"
+    """Explicit argument first, then GOOGLE_PLACES_API_KEY. Never hardcode a key here."""
+    key = api_key or os.environ.get("GOOGLE_PLACES_API_KEY")
     if not key:
         raise ValueError(
             "Google Places API key required. Pass api_key=... or set "
-            "GOOGLE_PLACES_API_KEY in the environment."
+            "GOOGLE_PLACES_API_KEY in the environment (on Databricks, from a secret scope)."
         )
     return key
 

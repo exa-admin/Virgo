@@ -10,18 +10,24 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 authors = [{ name = "MDM Engineering" }]
-# Runtime Spark/PySpark is provided by Databricks Runtime.
-# Local installs for editing/type-checking only:
+# PySpark and Delta come from the Databricks Runtime; the match engine adds nothing.
 dependencies = []
 
 [project.optional-dependencies]
-dev = [
-  "pyspark>=3.4.0",
-  "delta-spark>=2.4.0",
-]
+# Real runtime deps of src/dq (Google Places enrichment); installed on the cluster only
+# if you use that module: pip install "mdm-engine[dq]"
+dq = ["pandas>=2.0,<3.0", "requests>=2.31"]
+# Local editing / type-checking. Mirrors requirements.txt, which is what PyCharm reads —
+# keep the two in step. Never installed on a Databricks cluster.
+dev = ["pyspark>=3.5,<5", "databricks-sdk>=0.20", "pandas>=2.0,<3.0", "requests>=2.31"]
+
+[project.scripts]
+mdm-match = "matching.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-matching = ["py.typed"]
+# Ship the country configs inside the wheel so an install is runnable as-is.
+# MDM_CONF_DIR overrides them at runtime without a rebuild.
+matching = ["conf/*.json", "conf/countries/*.json"]

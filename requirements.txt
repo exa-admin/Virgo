@@ -1,8 +1,21 @@
-# Runtime Spark/PySpark is supplied by Databricks Runtime.
-# Install optional deps only for local editing / type-checking:
+# Local development environment only — this file is NEVER installed on a Databricks
+# cluster. The deployable wheel declares no dependencies at all (see pyproject.toml):
+# PySpark and Delta come from the Databricks Runtime.
 #
-#   pip install -e ".[dev]"
+#     pip install -r requirements.txt
 #
-# Or pin locally (versions vary by DBR):
-# pyspark>=3.4.0
-# delta-spark>=2.4.0
+# Pin pyspark to your Databricks Runtime's Spark version so completions and type hints
+# match what actually runs:
+#     DBR 14.x / 15.x  ->  pyspark~=3.5.0
+#     DBR 16.x / 17.x  ->  pyspark~=4.0.0
+# PySpark ships its own type hints — do not add the deprecated "pyspark-stubs" package.
+pyspark>=3.5,<5
+
+# Only used under `if TYPE_CHECKING:` in notebooks/, so the IDE can resolve the globals
+# Databricks injects (spark, dbutils, display). Never imported at runtime.
+databricks-sdk>=0.20
+
+# Real runtime dependencies of src/dq (the Google Places address enrichment).
+# Capped below 3.0 because PySpark does not yet fully support pandas 3.
+pandas>=2.0,<3.0
+requests>=2.31

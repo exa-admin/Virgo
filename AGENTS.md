@@ -15,7 +15,7 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 
 ## High-level pipeline
 
-1. **Load** source via `matching.sources.build_source_population` (kept separate so the
+1. **Load** source via `matching.io.read_source_population` (kept separate so the
    input can be Delta/CSV/Parquet): the operator view (`sl_bdl_processed_cd_prod.cd.vw_ufsoperator`,
    the population to match) plus the golden view (`…vw_ufsoperatorgoden`, already-matched
    masters) — golden masters absent from the operator feed are backfilled with a synthetic
@@ -28,10 +28,10 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 7. **Source golden group links** (`preserve_source_golden_groups`): star edges over every Informatica `SourceGoldenRecordId` shared by ≥ 2 records (all records, excluded ones included) → `MDMRuleResults` stage `000_Source_GoldenRecordId`; engine edges that directly bridge two Informatica groups are dropped when `allow_source_golden_group_merge` is false.
 8. **Match links** country slice → `MDMMatchLinks`.
 9. **Connected components** (native min-label iteration) → `MDMComponentLabels`; then, if merges are disallowed, components still holding several Informatica ids are re-labelled along group lines and the bridging edges are dropped (`MDMRuleResults` stage `999_Blocked_Source_GoldenRecordId_Merge`, `MDMMatchLinks` rewritten).
-10. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`MDMRowRegistry.MDMGoldenId`), else mint from `MDMGoldenIdSequence`. `validate_source_golden_group_assignments` fails fast if an Informatica group was split/renamed. Assignments are written back to `MDMRowRegistry`; remaps go to `MDMGoldenIdHistory`.
+10. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`MDMRowRegistry.MDMGoldenId`), else mint from `MDMGoldenIdSequence`. `validate_group_assignments` fails fast if an Informatica group was split/renamed. Assignments are written back to `MDMRowRegistry`; remaps go to `MDMGoldenIdHistory`.
 11. **Matched results** → `MDMMatchedResults` (`replaceWhere` country).
 
-## Golden ID continuity policy (read before touching `golden_ids.py` / `source_golden_groups.py` / `_ensure_row_registry`)
+## Golden ID continuity policy (read before touching `golden_ids.py` / `graph.py` / `pipeline._attach_row_registry`)
 
 The company replaces Informatica MDM **country by country**. Hard requirements:
 
@@ -57,7 +57,7 @@ The company replaces Informatica MDM **country by country**. Hard requirements:
 4. For a migrated country the source `GoldenRecordId` may go NULL: the registry MERGE never
  downgrades a non-null `SourceGoldenRecordId` to NULL. The source column is a numeric
  STRING; a non-blank non-integer value fails the run instead of silently casting to NULL.
-5. `validate_source_golden_group_assignments` fails the run (before any write-back) if an
+5. `validate_group_assignments` fails the run (before any write-back) if an
  Informatica id would end up on more than one component, on an engine-minted id, or (when
  merges are disallowed) on a different id.
 
@@ -68,13 +68,11 @@ earliest date, smallest `TempClusterId`); the others get their own prior id or a
 (with preserved groups this only ever concerns engine ids).
 Merges/splits are logged to `MDMGoldenIdHistory` (`Reason` = `MERGE` | `SPLIT`).
 Full description: `docs/ARCHITECTURE.md` → "Golden IDs (Informatica continuity)".
-`SYNTHETIC_GOLDEN_ID_OFFSET` is deprecated and unused.
 
 Public API:
 
 ```python
-from matching.pipeline import run_country, run_all
-from matching.config import load_country_config
+from matching import run_country, run_all, load_country_config, available_countries
 ```
 
 ## Key tables
@@ -100,19 +98,23 @@ Defaults live in `matching.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.
 
 ## How to run (Databricks)
 
-1. Run `sql/setup_tables.sql` (adjust catalog/schema per env).
-2. Ensure `src/` is on `sys.path` (see `notebooks/01_run_match_country.py`).
-3. Call:
+1. Build the wheel: `./scripts/build_wheel.sh` → `dist/mdm_engine-<ver>-py3-none-any.whl`.
+2. Install it as a cluster/job library (or `%pip install <path to whl>` in a notebook).
+3. Run `sql/setup_tables.sql` once per environment.
 
 ```python
-from matching.config import load_country_config
-from matching.pipeline import run_country
+from matching import run_country, run_all
 
-run_country(spark, "MY", load_country_config("MY"))
-# or
-from matching.pipeline import run_all
-run_all(spark)
+run_country(spark, "MY")     # one country
+run_all(spark)               # every country with a config
+run_all(spark, ["MY", "SG"]) # a subset
 ```
+
+Notebook: `notebooks/run_match.py` (widget-driven). Job: Python wheel task, entry point
+`mdm-match`, parameters `["--country","MY"]` or `["--all"]`.
+
+Configs ship **inside** the wheel at `src/matching/conf/`. `MDM_CONF_DIR` (or
+`--conf-dir`) points the loader at an external folder instead.
 
 ## Conventions
 
@@ -120,7 +122,7 @@ run_all(spark)
 - Prefer **no GraphFrames / GraphX**.
 - Writes are **country-partitioned Delta slices** (`replaceWhere` / delete-by-country).
 - Match methods are Spark-native (exact keys, Levenshtein, token Jaccard, blocking).
-- Config is layered: `conf/base.json` (cross-country defaults — source specs, `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, …) merged with `conf/countries/{CC}.json` (per-country settings: the **match rules** — `exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules` — plus any base overrides; country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}` country file inherits all base defaults (see `MY.json`). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded. `MDM_CONF_DIR` env var relocates `conf/` (e.g. wheel deploys).
+- Config is layered: `src/matching/conf/base.json` (cross-country defaults — source specs, `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, …) merged with `src/matching/conf/countries/{CC}.json` (per-country settings: the **match rules** — `exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules` — plus any base overrides; country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}` country file inherits all base defaults (see `MY.json`). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded. `MDM_CONF_DIR` env var relocates `conf/` without rebuilding the wheel.
 
 ## Package map
 
@@ -134,18 +136,18 @@ Intended layout:
 
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | Constants, JSON loaders (`conf/base.json` master + per-country override merge), `_runtime_cfg` |
-| `sources.py` | Source ingestion (delta/csv/parquet) for operator + golden views; `build_source_population` |
-| `utils.py` | Timing, cleaning, similarity, empty schemas, rule conditions |
-| `delta_io.py` | Table requires, overwrite slice, materialize helpers |
-| `standardize.py` | `standardize_input` |
-| `exact_match.py` | Star edges, block caps, priority |
-| `fuzzy_match.py` | Blocking + fuzzy scores + evaluations |
-| `match_pipeline.py` | Waterfall orchestration |
-| `components.py` | `connected_components_native` (raises on non-convergence) |
-| `source_golden_groups.py` | Informatica groupings as hard links; direct/transitive bridge blocking; blocked-edge stewardship output |
+| `config.py` | Constants, layered JSON loaders (`conf/base.json` + per-country override), `resolve_config` (table names) |
+| `io.py` | Source ingestion (delta/csv/parquet) via `read_source_population`; Delta requires / country-slice writes / stewardship materialization |
+| `expressions.py` | Spark column expressions: cleaning, similarity, rule conditions, link schema, timing |
+| `rules.py` | One rule → links: `run_exact_rule` (star edges, block caps), `run_fuzzy_rule` (blocking, scoring, evaluations) |
+| `graph.py` | `connected_components`; Informatica groups as hard links, direct/transitive bridge blocking, blocked-edge stewardship output |
 | `golden_ids.py` | Golden id continuity: candidate claim/choice, allocator, registry write-back, history, group-preservation validation |
-| `pipeline.py` | Enrich, registry, exclusions, `run_country` / `run_all` |
+| `pipeline.py` | `run_country` / `run_all`, `run_match_waterfall`, registry MERGE, enrichment, standardization, exclusions, output |
+| `cli.py` | `mdm-match` console entry point (Databricks Python wheel task) |
+
+Rules of thumb when adding code: source/Delta access goes in `io.py`, anything that returns
+a `Column` goes in `expressions.py`, label propagation goes in `graph.py`, and `pipeline.py`
+only orchestrates.
 
 ### `src/dq/` — data quality
 
@@ -192,7 +194,7 @@ Do not commit secrets. `.gitignore` already covers `.env` and `.env.*`.
 ## Editing guidance for agents
 
 - Preserve match semantics (priorities, exclusions, block size caps) and the golden id continuity policy above (never re-mint an id the registry already knows; never split or rename an Informatica group; keep `golden_id_floor` identical across countries and only raise it).
-- Source golden group edges live **outside** the priority waterfall on purpose: they must not change which rule other records match on. Do not fold them into `run_match_pipeline`.
+- Source golden group edges live **outside** the priority waterfall on purpose: they must not change which rule other records match on. Do not fold them into `run_match_waterfall`.
 - Prefer small, focused changes; do not “simplify away” stewardship tables or waterfall.
 - When adding countries, copy `conf/countries/template.json` → `conf/countries/<CC>.json` and edit; do not hardcode rules in Python. `template.json` / `_*.json` are never loaded as countries.
 - Identity column DDL for `MDMRowId` may need env-specific adjustment — see comments in `sql/setup_tables.sql`.
@@ -202,4 +204,5 @@ Do not commit secrets. `.gitignore` already covers `.env` and `.env.*`.
 - Human overview: `README.md`
 - Pipeline diagram: `docs/ARCHITECTURE.md`
 - DDL: `sql/setup_tables.sql`
-- Entry notebook: `notebooks/01_run_match_country.py`
+- Entry notebook: `notebooks/run_match.py`
+- Deployment: `docs/DEPLOYMENT.md`

@@ -1,15 +1,11 @@
-"""Databricks / Spark-native Customer MDM Match engine.
+"""Databricks / Spark-native Customer MDM match engine.
 
-Public API:
-    from matching.pipeline import run_country, run_all
-    from matching.config import load_country_config
+    from matching import run_country, run_all
+
+    run_country(spark, "MY")   # one country
+    run_all(spark)             # every country with a config
 """
-from matching.config import load_all_country_configs, load_country_config
+from matching.config import available_countries, load_country_config
 from matching.pipeline import run_all, run_country
 
-__all__ = [
-    "load_country_config",
-    "load_all_country_configs",
-    "run_country",
-    "run_all",
-]
+__all__ = ["run_country", "run_all", "load_country_config", "available_countries"]
