@@ -70,6 +70,26 @@ resolves next to it. This is the pure point-and-click path.
 
    `conf/` resolves automatically because it sits next to `src/` inside the unzipped folder.
 
+### Run one country via `notebooks/01_run_match_country.py`
+
+`01_run_match_country.py` is a ready-made single-country entry point (widgets:
+`country_code`, `run_mode`, `src_path`). To run one country set `run_mode = country` and
+`country_code = MY` — it calls `run_country(spark, "MY")` for just that country.
+
+Important: a notebook only executes when it lives in the **Workspace/Repos**, not in a
+Volume. So with the Volume upload above:
+
+1. Import the notebook into your Workspace: **Workspace → Import → File**, and pick
+   `notebooks/01_run_match_country.py` from your machine (the copy inside the unzipped
+   bundle also works). A matching `00_path_setup.py` is optional.
+2. Open it and set the widgets:
+   - `src_path` = `/Volumes/<catalog>/<schema>/<volume>/mdm_engine_app/mdm_engine/src`
+     (so it imports the code you uploaded to the Volume; leave blank only when the whole
+     folder — including `src/` — is in the Workspace next to the notebook, where it
+     auto-resolves).
+   - `country_code` = `MY`, `run_mode` = `country`.
+3. Run all cells. `conf/` is still found next to that `src/` on the Volume.
+
 > Tip: unzip into a **Volume** (persistent), not `/tmp` or `/databricks/driver` (wiped when
 > the cluster restarts). To keep `conf/` somewhere other than next to `src/`, set
 > `os.environ["MDM_CONF_DIR"] = ".../mdm_engine/conf"` before importing `matching`.
@@ -77,7 +97,8 @@ resolves next to it. This is the pure point-and-click path.
 ### Alternatives (if you later have CLI or Git access)
 
 - **Git Repos**: Workspace → Repos → Add Repo → paste the Git URL, then open
-  `notebooks/01_run_match_country.py` (it runs `%run ./00_path_setup` to wire `sys.path`).
+  `notebooks/01_run_match_country.py`. Because the notebook sits next to `src/` in the repo,
+  leave the `src_path` widget blank — it auto-resolves `src/`.
 - **Databricks CLI**: `databricks workspace import-dir dist/mdm_engine /Workspace/Users/<you>/mdm_engine --overwrite`.
 
 ## Option B — Wheel (cluster/job library)
@@ -88,10 +109,9 @@ resolves next to it. This is the pure point-and-click path.
 
    ```python
    import os
-   os.environ["MDM_CONF_DIR"] = "/Workspace/.../mdm_engine/conf"
-   from matching.config import load_country_config
+   os.environ["MDM_CONF_DIR"] = "/Volumes/<cat>/<sch>/<vol>/mdm_engine/conf"
    from matching.pipeline import run_country, run_all
-   run_country(spark, "MY", load_country_config("MY"))
+   run_country(spark, "MY")   # one country
    # or every country in conf/countries/: run_all(spark)
    ```
 
@@ -100,12 +120,13 @@ resolves next to it. This is the pure point-and-click path.
 
 ## Configuration model
 
-- `conf/base.json` — master config shared by every country (source specs, `EnrichDate`,
-  `standardization`, match rules, `invalid_values`, `target_schema`, ...).
-- `conf/countries/{CC}.json` — per-country **overrides only**; merged on top of base
-  (country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}`
-  inherits all base defaults (see `MY.json`). Add a country by copying
-  `conf/countries/template.json` to `{CC}.json`.
+- `conf/base.json` — cross-country defaults (source specs, `EnrichDate`, `standardization`,
+  `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, ...).
+- `conf/countries/{CC}.json` — per-country **match rules** (`exact_match_rules`,
+  `default_fuzzy_blocking`, `fuzzy_match_rules`) plus any base overrides; merged on top of
+  base (country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. Add a country
+  by copying `conf/countries/template.json` (or an existing country like `MY.json`) to
+  `{CC}.json` and editing its rules.
 
 ## Swapping the source format
 
