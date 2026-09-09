@@ -28,78 +28,62 @@ Build both:
    These are set in `conf/base.json` under `source` / `golden_source`. To read files
    instead of tables, change the spec (see "Swapping the source format" below).
 
-## Option A — Deploy as a folder via UI upload (no CLI, no Git)
+## Option A — Deploy as a folder via the Workspace Import UI (no Volume, no CLI, no Git)
 
-The whole project lives as one folder; a notebook adds `src/` to `sys.path` and `conf/`
-resolves next to it. This is the pure point-and-click path.
+The whole project lives as one folder in your Workspace; the run notebook sits next to
+`src/`, adds it to `sys.path`, and `conf/` resolves next to it.
 
 1. **Build the bundle locally** (once): `./scripts/build_databricks_bundle.sh` →
    `dist/mdm_engine_bundle.zip`.
 
-2. **Upload the zip to a Unity Catalog Volume** (a Volume is the UI-friendly place for
-   arbitrary files):
-   - Databricks left nav → **Catalog** → pick a catalog/schema → a **Volume** (create one
-     with **Create → Volume** if needed).
-   - Click **Upload to this volume** and select `mdm_engine_bundle.zip`. It lands at
-     `/Volumes/<catalog>/<schema>/<volume>/mdm_engine_bundle.zip`.
+2. **Import the zip into your Workspace:**
+   - Databricks sidebar → **Workspace → Users → `<your user>`**.
+   - Click the **⋮ (kebab)** on your user folder (or right-click) → **Import**.
+   - In the dialog choose **File**, drop in `mdm_engine_bundle.zip`, and click **Import**.
+   - Databricks expands the archive into a folder (`mdm_engine/`) containing
+     `src/ conf/ sql/ notebooks/`. The engine modules (`matching/`, `dq/`) and `conf/*.json`
+     land as **Workspace files** (importable); the `notebooks/*.py` become **notebooks**.
 
-3. **Unzip it (once) from a notebook cell** into the same Volume:
+   This needs Workspace Files, which is on by default in current Databricks. Non-notebook
+   files import as files because they lack the `# Databricks notebook source` header.
 
-   ```python
-   %sh
-   cd /Volumes/<catalog>/<schema>/<volume>
-   unzip -o mdm_engine_bundle.zip -d mdm_engine_app
-   ls mdm_engine_app/mdm_engine        # -> conf  notebooks  sql  src
-   ```
+3. **Create the tables** (one time): open `mdm_engine/sql/setup_tables.sql`, copy it into a
+   SQL editor/cell and run it. It already targets `pds_auroradsar_prod.schema_informatica`
+   — run as-is.
 
-   You now have the folder at
-   `/Volumes/<catalog>/<schema>/<volume>/mdm_engine_app/mdm_engine`.
+4. **Run one country:** open `mdm_engine/notebooks/01_run_match_country.py` and set widgets:
+   - `src_path` = **blank** — it auto-resolves `src/` because the notebook sits next to it
+     in the same Workspace folder (e.g. `/Workspace/Users/<you>/mdm_engine/src`).
+   - `country_code` = `MY`, `run_mode` = `country`.
 
-4. **Create the tables** (one time): open
-   `.../mdm_engine_app/mdm_engine/sql/setup_tables.sql`, copy it into a SQL cell/editor and
-   run it. It already targets `pds_auroradsar_prod.schema_informatica` — run as-is.
+   Run all cells → it calls `run_country(spark, "MY")` and displays the results. `conf/` is
+   found automatically next to `src/`.
 
-5. **Run the match** from a Python notebook:
+   Or, from any notebook cell without the entry notebook:
 
    ```python
    import sys
-   sys.path.insert(0, "/Volumes/<catalog>/<schema>/<volume>/mdm_engine_app/mdm_engine/src")
+   sys.path.insert(0, "/Workspace/Users/<you>/mdm_engine/src")
    from matching.pipeline import run_country
    run_country(spark, "MY")   # global from conf/base.json + country from conf/countries/MY.json
    ```
 
-   `conf/` resolves automatically because it sits next to `src/` inside the unzipped folder.
+> If your workspace imports the whole zip as notebooks (older workspaces without Workspace
+> Files), the engine modules won't be importable. In that case use a **Volume** upload
+> (below) or **Repos**/**CLI**.
 
-### Run one country via `notebooks/01_run_match_country.py`
+### Alternatives
 
-`01_run_match_country.py` is a ready-made single-country entry point (widgets:
-`country_code`, `run_mode`, `src_path`). To run one country set `run_mode = country` and
-`country_code = MY` — it calls `run_country(spark, "MY")` for just that country.
-
-Important: a notebook only executes when it lives in the **Workspace/Repos**, not in a
-Volume. So with the Volume upload above:
-
-1. Import the notebook into your Workspace: **Workspace → Import → File**, and pick
-   `notebooks/01_run_match_country.py` from your machine (the copy inside the unzipped
-   bundle also works). A matching `00_path_setup.py` is optional.
-2. Open it and set the widgets:
-   - `src_path` = `/Volumes/<catalog>/<schema>/<volume>/mdm_engine_app/mdm_engine/src`
-     (so it imports the code you uploaded to the Volume; leave blank only when the whole
-     folder — including `src/` — is in the Workspace next to the notebook, where it
-     auto-resolves).
-   - `country_code` = `MY`, `run_mode` = `country`.
-3. Run all cells. `conf/` is still found next to that `src/` on the Volume.
-
-> Tip: unzip into a **Volume** (persistent), not `/tmp` or `/databricks/driver` (wiped when
-> the cluster restarts). To keep `conf/` somewhere other than next to `src/`, set
-> `os.environ["MDM_CONF_DIR"] = ".../mdm_engine/conf"` before importing `matching`.
-
-### Alternatives (if you later have CLI or Git access)
-
-- **Git Repos**: Workspace → Repos → Add Repo → paste the Git URL, then open
-  `notebooks/01_run_match_country.py`. Because the notebook sits next to `src/` in the repo,
-  leave the `src_path` widget blank — it auto-resolves `src/`.
-- **Databricks CLI**: `databricks workspace import-dir dist/mdm_engine /Workspace/Users/<you>/mdm_engine --overwrite`.
+- **Volume upload:** upload `mdm_engine_bundle.zip` to a UC Volume (**Catalog → Volume →
+  Upload to this volume**), unzip in a `%sh` cell
+  (`unzip -o /Volumes/<cat>/<sch>/<vol>/mdm_engine_bundle.zip -d /Volumes/<cat>/<sch>/<vol>/mdm_engine_app`),
+  import just `01_run_match_country.py` into the Workspace, and set its `src_path` widget to
+  `.../mdm_engine_app/mdm_engine/src` (a notebook can't execute from a Volume, but it can
+  import code from one). Unzip into a Volume — not `/tmp` or `/databricks/driver`, which are
+  wiped on restart.
+- **Git Repos:** Workspace → Repos → Add Repo → paste the Git URL, open
+  `notebooks/01_run_match_country.py`, leave `src_path` blank (auto-resolves).
+- **Databricks CLI:** `databricks workspace import-dir dist/mdm_engine /Workspace/Users/<you>/mdm_engine --overwrite`.
 
 ## Option B — Wheel (cluster/job library)
 
