@@ -150,6 +150,7 @@ def resolve_config(country_code: str, cfg: Optional[Dict[str, Any]] = None) -> D
         "componentLabelsTable": f"{schema}.MDMComponentLabels",
         "matchedResultsTable": f"{schema}.MDMMatchedResults",
         "goldenIdHistoryTable": f"{schema}.MDMGoldenIdHistory",
+        "changeLogTable": f"{schema}.operator_golden_changelog",
         "goldenIdSequenceTable": f"{schema}.MDMGoldenIdSequence",
         "exact_max_block_size": DEFAULT_EXACT_MAX_BLOCK_SIZE,
         "fuzzy_max_block_size": DEFAULT_FUZZY_MAX_BLOCK_SIZE,

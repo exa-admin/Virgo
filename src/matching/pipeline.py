@@ -54,6 +54,7 @@ from matching.golden_ids import (
     assign_golden_ids,
     collect_record_match_rules,
     persist_assignments,
+    save_change_log,
     save_history,
     validate_golden_id_space,
     validate_group_assignments,
@@ -417,6 +418,19 @@ def run_country(spark: SparkSession, country_code: str, cfg: Optional[Dict[str, 
     match_links = run_match_waterfall(matchable, country_code, cfg)
     blocked_links = None
 
+    # What OUR rules alone say, before Informatica's groupings are forced into the graph.
+    # Kept because the final golden_id can never disagree with Informatica once those
+    # groupings are hard-linked, so this is the only column the over/undermatch views can
+    # honestly compare against.
+    with timed(f"Country {country_code}: engine-only components"):
+        engine_components = graph.connected_components(
+            country_code,
+            matched_record_ids(match_links),
+            match_links,
+            cfg,
+            stage_prefix="engine_labels",
+        )
+
     # --- Informatica groups as hard links -------------------------------------------
     if bool(cfg["preserve_source_golden_groups"]):
         with timed(f"Country {country_code}: source golden group links"):
@@ -496,14 +510,30 @@ def run_country(spark: SparkSession, country_code: str, cfg: Optional[Dict[str, 
 
     # --- output ------------------------------------------------------------------------
     with timed(f"Country {country_code}: final output"):
-        final_df = _build_output(processed, golden_ids, record_rules, excluded).persist(StorageLevel.MEMORY_AND_DISK)
+        final_df = _build_output(processed, golden_ids, record_rules, excluded, engine_components).persist(
+            StorageLevel.MEMORY_AND_DISK
+        )
         final_df.count()
 
         history_count = save_history(final_df, cfg, country_code)
         print(f"  -> Golden id transitions recorded in {cfg['goldenIdHistoryTable']}: {history_count}")
+        # Reads the PREVIOUS run's slice, so it has to happen before the overwrite below.
+        change_count = save_change_log(final_df, cfg, country_code)
+        print(f"  -> Golden id changes traced in {cfg['changeLogTable']}: {change_count}")
         io.overwrite_slice(final_df, cfg["matchedResultsTable"], where_country, merge_schema=True)
 
-    for cached in (components, linked_ids, match_links, blocked_links, excluded, processed, matchable, golden_ids, final_df):
+    for cached in (
+        components,
+        engine_components,
+        linked_ids,
+        match_links,
+        blocked_links,
+        excluded,
+        processed,
+        matchable,
+        golden_ids,
+        final_df,
+    ):
         if cached is not None:
             cached.unpersist()
 
@@ -518,9 +548,11 @@ def _build_output(
     golden_ids: DataFrame,
     record_rules: DataFrame,
     excluded: DataFrame,
+    engine_components: DataFrame,
 ) -> DataFrame:
     """Join everything the run produced into the MDMMatchedResults row shape."""
     group_sizes = golden_ids.groupBy("golden_id").agg(F.count("*").alias("match_group_size"))
+    engine_ids = engine_components.select("record_id", F.col("golden_id").alias("_engine_match_id"))
     previous_golden_id = F.col(PREVIOUS_GOLDEN_ID_COLUMN).cast("long")
     source_golden_id = F.col("SourceGoldenRecordId").cast("long")
 
@@ -529,7 +561,11 @@ def _build_output(
         .join(record_rules, "record_id", "left")
         .join(excluded, "record_id", "left")
         .join(group_sizes, "golden_id", "left")
+        .join(engine_ids, "record_id", "left")
         .withColumn("match_group_size", F.coalesce(F.col("match_group_size"), F.lit(1)))
+        # A record our rules never linked is its own engine group.
+        .withColumn("engine_match_id", F.coalesce(F.col("_engine_match_id"), F.col("record_id")).cast("long"))
+        .withColumn("MatchRunTimestamp", F.current_timestamp())
         .withColumn("is_excluded_from_match", F.coalesce(F.col("is_excluded_from_match"), F.lit(False)))
         # An excluded record never takes part in engine rules, so the only link it can carry
         # is Source_GoldenRecordId: it stays in its Informatica group and is labelled as
@@ -559,6 +595,7 @@ def _build_output(
         )
         .drop(
             "is_excluded_from_match",
+            "_engine_match_id",
             "TempClusterId",
             PREVIOUS_GOLDEN_ID_COLUMN,
             PREVIOUS_GOLDEN_ID_SOURCE_COLUMN,

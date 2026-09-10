@@ -20,6 +20,9 @@ dq = ["pandas>=2.0,<3.0", "requests>=2.31"]
 # Local editing / type-checking. Mirrors requirements.txt, which is what PyCharm reads —
 # keep the two in step. Never installed on a Databricks cluster.
 dev = ["pyspark>=3.5,<5", "databricks-sdk>=0.20", "pandas>=2.0,<3.0", "requests>=2.31"]
+# The test suite runs on a Databricks cluster (see docs/TESTING.md), where Spark and Delta
+# come from the runtime. pytest is the only thing to install there.
+test = ["pytest>=7.0"]
 
 [project.scripts]
 mdm-match = "matching.cli:main"

@@ -4,6 +4,9 @@
 #
 #     pip install -r requirements.txt
 #
+# This is for editing and IDE resolution only. The tests run on a cluster, not here —
+# see docs/TESTING.md.
+#
 # Pin pyspark to your Databricks Runtime's Spark version so completions and type hints
 # match what actually runs:
 #     DBR 14.x / 15.x  ->  pyspark~=3.5.0

@@ -110,11 +110,67 @@ if results:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Golden id changes traced this run
+# MAGIC
+# MAGIC Every `OperatorConcatId` whose golden id moved, with the previous run's matching
+# MAGIC data next to this run's and the reason it changed.
+
+# COMMAND ----------
+
+if results:
+    country_list = ", ".join(f"'{c}'" for c in sorted(results))
+    display(
+        spark.sql(f"""
+            SELECT ChangeReason, COUNT(*) AS records, COUNT(DISTINCT OperatorConcatId) AS operators
+            FROM pds_auroradsar_prod.schema_informatica.operator_golden_changelog
+            WHERE CountryCode IN ({country_list})
+              AND RunTimestamp >= current_timestamp() - INTERVAL 1 DAY
+            GROUP BY ChangeReason ORDER BY records DESC
+        """)
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Where Informatica disagrees with us
+# MAGIC
+# MAGIC Hand these to the Informatica team. Both compare `engine_match_id` (what our rules
+# MAGIC found on their own) against Informatica's `GoldenRecordId` — see README for why
+# MAGIC `golden_id` cannot be used here.
+
+# COMMAND ----------
+
+if results:
+    country_list = ", ".join(f"'{c}'" for c in sorted(results))
+    print("UNDERMATCH — we matched them, Informatica did not:")
+    display(
+        spark.sql(f"""
+            SELECT * FROM pds_auroradsar_prod.schema_informatica.vw_informatica_undermatch
+            WHERE CountryCode IN ({country_list})
+            ORDER BY engine_group_size DESC, engine_match_id
+        """)
+    )
+
+# COMMAND ----------
+
+if results:
+    country_list = ", ".join(f"'{c}'" for c in sorted(results))
+    print("OVERMATCH — Informatica matched them, our rules found no evidence:")
+    display(
+        spark.sql(f"""
+            SELECT * FROM pds_auroradsar_prod.schema_informatica.vw_informatica_overmatch
+            WHERE CountryCode IN ({country_list})
+            ORDER BY informatica_group_size DESC, SourceGoldenRecordId
+        """)
+    )
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Inspect one country's results
 # MAGIC
-# MAGIC Stewardship detail lives in `MDMRuleResults` (accepted edges per rule),
-# MAGIC `MDMRuleEvaluations` (every fuzzy candidate and its scores) and `MDMGoldenIdHistory`
-# MAGIC (old → new id remaps).
+# MAGIC Rule-level evidence lives in `MDMRuleResults` (accepted edges per rule) and
+# MAGIC `MDMRuleEvaluations` (every fuzzy candidate and its scores).
 
 # COMMAND ----------
 
@@ -128,6 +184,7 @@ if results:
             "ZipCode",
             "golden_id",
             "golden_id_source",
+            "engine_match_id",
             "match_group_size",
             "is_matched",
             "final_match_rule",

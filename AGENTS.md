@@ -6,6 +6,29 @@ Instructions for AI coding agents and humans starting a new session in this repo
 
 Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark**, analogous to Informatica MDM, Customer 360, and Adobe identity management. Today this repo implements the **Match** half: resolve duplicate operators into golden groups via exact + fuzzy rules, connected components, and stable golden IDs written to Delta.
 
+## Starting on a new machine
+
+Nothing in this repo runs meaningfully outside Databricks — the local setup exists only so
+an editor can resolve imports and so you can lint. There is no local database, no local
+Spark workflow to learn, and no build step beyond the wheel.
+
+```bash
+git clone <repo> && cd Virgo
+python3.11 -m venv .venv                 # 3.10-3.12; match your DBR's Python
+.venv/bin/pip install -r requirements.txt
+```
+
+Point your IDE's interpreter at `.venv/bin/python`. That is the whole setup.
+
+- `requirements.txt` is **editing only** — never installed on a cluster. It pins `pyspark`
+  (for completions; match your DBR's Spark version) and `databricks-sdk` (so the IDE can
+  resolve `spark` / `dbutils` / `display`, which notebooks import under `TYPE_CHECKING`).
+- The wheel itself has **zero** dependencies: `./scripts/build_wheel.sh`.
+- To verify a change without a cluster: `python -m pyflakes src/matching/*.py` and
+  `python -c "import matching"`. Real verification means running on Databricks.
+- `.venv/` should not live in iCloud Drive if the repo does — Spark's jars and sync do not
+  get along. Prefer a local checkout.
+
 ## Base code (do not reverse)
 
 - **Canonical engine:** Python **PySpark** under `src/matching/` (match phase).
@@ -29,7 +52,15 @@ Customer **Master Data Management (MDM) Match & Merge** on **Databricks / Spark*
 8. **Match links** country slice → `MDMMatchLinks`.
 9. **Connected components** (native min-label iteration) → `MDMComponentLabels`; then, if merges are disallowed, components still holding several Informatica ids are re-labelled along group lines and the bridging edges are dropped (`MDMRuleResults` stage `999_Blocked_Source_GoldenRecordId_Merge`, `MDMMatchLinks` rewritten).
 10. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`MDMRowRegistry.MDMGoldenId`), else mint from `MDMGoldenIdSequence`. `validate_group_assignments` fails fast if an Informatica group was split/renamed. Assignments are written back to `MDMRowRegistry`; remaps go to `MDMGoldenIdHistory`.
-11. **Matched results** → `MDMMatchedResults` (`replaceWhere` country).
+11. **Matched results** → `MDMMatchedResults` (`replaceWhere` country), after appending
+ record-level golden id changes to `operator_golden_changelog` (that step reads the
+ PREVIOUS slice, so it must stay before the overwrite).
+
+A second, engine-only components pass (`stage_prefix="engine_labels"`) runs on the
+waterfall links **before** the Informatica group links are added, and lands in
+`MDMMatchedResults.engine_match_id`. It exists solely so the over/undermatch views have
+something to compare Informatica against — `golden_id` cannot disagree with Informatica
+once `preserve_source_golden_groups` hard-links those groups. Do not "optimise" it away.
 
 ## Golden ID continuity policy (read before touching `golden_ids.py` / `graph.py` / `pipeline._attach_row_registry`)
 
@@ -88,6 +119,8 @@ from matching import run_country, run_all, load_country_config, available_countr
 | `MDMMatchingState` | Intermediate ID sets for waterfall / grouping |
 | `MDMMatchLinks` | Final country match graph |
 | `MDMComponentLabels` | Component labels per iteration |
+| `operator_golden_changelog` | Append-only record-level trace of golden id changes per `OperatorConcatId` with previous/current matching data and `ChangeReason` |
+| `vw_informatica_undermatch` / `vw_informatica_overmatch` | Views comparing `engine_match_id` (our rules alone) against Informatica's `SourceGoldenRecordId` |
 | `MDMMatchedResults` | Output with `golden_id`, `golden_id_source`, `previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `final_match_rule`, flags |
 | `mdmenrichedoperators` | External enrichment (not created by setup SQL) |
 
@@ -182,26 +215,67 @@ export GOOGLE_PLACES_API_KEY='your-key-here'
 
 Do not commit secrets. `.gitignore` already covers `.env` and `.env.*`.
 
+## Current state — 2026-09-10
+
+The engine was restructured and extended; treat the following as recent and worth reading
+before changing anything nearby.
+
+- `src/matching/` was consolidated from 13 modules to 9 (`config`, `io`, `expressions`,
+  `rules`, `graph`, `golden_ids`, `pipeline`, `cli`, `__init__`) with dead code removed.
+  Behaviour was preserved deliberately; if something looks odd, check git history before
+  "fixing" it.
+- `conf/` moved **inside the package** (`src/matching/conf/`) so the wheel is runnable as
+  installed. `MDM_CONF_DIR` still overrides it at runtime.
+- Deployment is the wheel only. The old zip-bundle and `sys.path` bootstrapping are gone,
+  along with `notebooks/00_path_setup.py`.
+- New: `operator_golden_changelog` (record-level golden id trace with cause),
+  `engine_match_id` on `MDMMatchedResults`, and the two Informatica comparison views.
+- New: `tests/` + `notebooks/run_tests.py`, run on a cluster (`docs/TESTING.md`).
+
+### Open items
+
+1. **Rotate the Google Places API key.** A live key was hardcoded in
+   `src/dq/address_enrichment.py` and is still in git history (commit `bc394a8`). The code
+   now reads `GOOGLE_PLACES_API_KEY` properly, but the leaked key must be rotated in the
+   Google Cloud console — editing the file does not undo the exposure.
+2. **`MY.json` SAP rule silently skips NULL `OTMText`.** Its
+   `match_exclusion_filter` is `["OTMText IN ('A++','DUMMY')"]`, which becomes
+   `NOT (OTMText IN (...))` — NULL, not TRUE, when `OTMText` is NULL, so those records
+   never reach the rule. Decide whether to wrap it in `coalesce(OTMText, '')`. The current
+   behaviour is pinned by
+   `test_null_in_an_exclusion_column_silently_drops_the_record_from_that_rule`, which will
+   fail (correctly) once fixed. Check other exclusion filters on nullable columns too.
+3. **The test suite has never been observed passing.** It was written and statically
+   checked but not yet run green on a cluster. The first cluster run is the real shakedown;
+   a failure is more likely a wrong expectation about the MY rules (blocking keys, soundex)
+   than an engine defect.
+4. **No run has been executed against real data since the restructure.** Run MY end to end
+   and diff `MDMMatchedResults` against a pre-change run before trusting it.
+
 ## What is NOT built yet
 
 - Merge / survivorship of golden attributes
 - Incremental / CDC match
 - Stewardship UI
 - Match history beyond current Delta tables (golden id remaps are in `MDMGoldenIdHistory`)
-- Automated unit/integration tests
-- Local runnable Spark without Databricks (package is Databricks-oriented)
+- Any supported local workflow — the engine, the tests and the deployment are all
+  Databricks-only by design
 
 ## Editing guidance for agents
 
 - Preserve match semantics (priorities, exclusions, block size caps) and the golden id continuity policy above (never re-mint an id the registry already knows; never split or rename an Informatica group; keep `golden_id_floor` identical across countries and only raise it).
 - Source golden group edges live **outside** the priority waterfall on purpose: they must not change which rule other records match on. Do not fold them into `run_match_waterfall`.
 - Prefer small, focused changes; do not “simplify away” stewardship tables or waterfall.
+- Run the suite on a cluster (`notebooks/run_tests.py`) after any change to matching semantics. `tests/` asserts the golden id
+  continuity policy above; a failure there is a migration risk, not a flaky test.
 - When adding countries, copy `conf/countries/template.json` → `conf/countries/<CC>.json` and edit; do not hardcode rules in Python. `template.json` / `_*.json` are never loaded as countries.
 - Identity column DDL for `MDMRowId` may need env-specific adjustment — see comments in `sql/setup_tables.sql`.
 
 ## Pointers
 
+- Tests: `docs/TESTING.md` — they run on a Databricks cluster (`notebooks/run_tests.py`), not locally
 - Human overview: `README.md`
+- Table inventory (internal vs audit): `docs/TABLES.md`
 - Pipeline diagram: `docs/ARCHITECTURE.md`
 - DDL: `sql/setup_tables.sql`
 - Entry notebook: `notebooks/run_match.py`

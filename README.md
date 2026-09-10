@@ -16,6 +16,7 @@ Source → (optional enrichment) → Row registry → Standardize → Exclusions
 
 Details and a flowchart: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Deployment: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Table inventory (internal vs audit): [docs/TABLES.md](docs/TABLES.md).
 
 ## Quick start
 
@@ -55,7 +56,10 @@ entry point: mdm-match      parameters: ["--country", "MY"]   (or ["--all"])
 | `scripts/build_wheel.sh` | Build the deployable wheel |
 | `notebooks/run_match.py` | Run one country or all countries |
 | `notebooks/enrich_addresses.py` | Optional DQ pre-step |
-| `AGENTS.md` | Conventions for coding sessions |
+| `notebooks/run_tests.py` | Run the test suite on a cluster |
+| `tests/` | Match scenarios run end to end against real Delta tables |
+| `AGENTS.md` | Full brief for humans and coding agents: pipeline, policy, conventions, open items |
+| `CLAUDE.md` | Short pointer to AGENTS.md for Claude Code |
 
 ### `src/matching` modules
 
@@ -97,9 +101,46 @@ get a new one.**
   becoming NULL.
 - The run **fails before any write-back** if an Informatica id would end up split across
   components, on an engine-minted id, or — when merges are disallowed — changed at all.
-- Every old → new remap goes to `MDMGoldenIdHistory`; per-record detail is in
-  `MDMMatchedResults` (`previous_golden_id`, `golden_id_changed`,
-  `golden_id_differs_from_source`, `golden_id_source`).
+- Every old → new remap goes to `MDMGoldenIdHistory` (id level) and
+  `operator_golden_changelog` (record level — see below).
+
+## Tracing a golden id change
+
+`MDMMatchedResults` is overwritten each run, so the previous run's state would otherwise
+be lost. Before the overwrite, every `OperatorConcatId` whose golden id moved is appended
+to **`operator_golden_changelog`** with the previous run's matching data (rule, group size,
+name/address/city/zip), this run's, and a `ChangeReason`:
+
+| Reason | Meaning |
+|---|---|
+| `INFORMATICA_ID_CHANGED` | Informatica issued a different `GoldenRecordId` |
+| `SOURCE_DATA_CHANGED` | Name / address / city / zip changed — the usual root cause |
+| `GROUP_GREW` / `GROUP_SHRANK` | A merge pulled the row over, or a split pushed it out |
+| `INFORMATICA_ID_ADOPTED` | Row had an engine-minted id and now sits under an Informatica one |
+| `MATCH_RULE_CHANGED` | Same group size, different rule linked it |
+| `NO_PREVIOUS_RESULT` | Registry knew a prior id but the results table had no row |
+| `REASSIGNED` | Id moved with nothing else observably different — inspect |
+
+```sql
+SELECT * FROM pds_auroradsar_prod.schema_informatica.operator_golden_changelog
+WHERE OperatorConcatId = '<key>' ORDER BY RunTimestamp;
+```
+
+## Comparing against Informatica (over / undermatch)
+
+Two views hand the Informatica team a worklist:
+
+| View | Meaning |
+|---|---|
+| `vw_informatica_undermatch` | **We** matched these operators, Informatica did not — Informatica is missing matches |
+| `vw_informatica_overmatch` | **Informatica** matched these, our rules found no evidence — likely wrong matches |
+
+Both compare against `engine_match_id`, not `golden_id`. That distinction matters: with
+`preserve_source_golden_groups: true` the Informatica groupings are hard-linked into the
+graph before components run, so `golden_id` can never disagree with Informatica and would
+always report zero differences. `engine_match_id` is the grouping our rules reach on their
+own, computed in a separate components pass before those groupings are forced in — so it
+is the only honest basis for the comparison.
 
 Full tie-breaking and safety checks:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#golden-ids-informatica-continuity).
@@ -158,9 +199,40 @@ os.environ["GOOGLE_PLACES_API_KEY"] = dbutils.secrets.get(scope="mdm", key="goog
 Reviewed candidates have to land in `mdmenrichedoperators` for `EnrichDate: true` to pick
 them up; nothing flows into the match automatically.
 
+## Tests
+
+`tests/` runs the **real** engine end to end on a Databricks cluster: each test builds a
+throwaway schema from the real `sql/setup_tables.sql`, loads a small dummy source
+population, runs `run_country` with the real MY rules, and asserts on `MDMMatchedResults`.
+
+Open [`notebooks/run_tests.py`](notebooks/run_tests.py), set `test_schema` to a scratch
+schema, Run All. Or from any notebook:
+
+```python
+%pip install pytest
+```
+```python
+import os, sys, pytest
+repo = "/Workspace/Users/<you>/Virgo"
+os.environ["MDM_TEST_SCHEMA"] = "pds_auroradsar_dev.mdm_test"
+sys.path.insert(0, f"{repo}/src")
+pytest.main(["-q", f"{repo}/tests"])
+```
+
+The suite drops and recreates its schema between tests, so point it at scratch — it refuses
+to start against `schema_informatica`.
+
+Scenarios cover both directions: records that **must** be grouped (exact, fuzzy typo,
+transitive chains) and records that **must not** be (different businesses at the same
+address, junk names, excluded records), plus Informatica continuity, id stability across
+reruns, the changelog trace, and both comparison views.
+
+Full instructions, everyday pytest flags, how to read a failure and how to add a scenario:
+**[docs/TESTING.md](docs/TESTING.md)**.
+
 ## Not built yet
 
-Merge / survivorship, incremental (CDC) match, stewardship UI, automated tests.
+Merge / survivorship, incremental (CDC) match, stewardship UI.
 
 ## License
 

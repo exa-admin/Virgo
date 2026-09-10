@@ -58,18 +58,20 @@ def connected_components(
     record_ids: DataFrame,
     match_links: DataFrame,
     cfg: Dict[str, Any],
+    stage_prefix: str = "labels",
 ) -> DataFrame:
     """Label every record with its component id. Raises if propagation has not converged.
 
     Partially propagated labels would split real components and mint wrong golden ids, so
-    running out of iterations is a failure, not a result.
+    running out of iterations is a failure, not a result. ``stage_prefix`` names the
+    MDMComponentLabels checkpoints, so two passes in one run do not overwrite each other.
     """
     max_iterations = int(cfg["components_max_iterations"])
     labels = io.save_component_labels(
         record_ids.select("record_id", F.col("record_id").alias("golden_id")).dropDuplicates(["record_id"]),
         cfg["componentLabelsTable"],
         country_code,
-        "labels_initial",
+        f"{stage_prefix}_initial",
         0,
     ).persist(StorageLevel.MEMORY_AND_DISK)
 
@@ -90,7 +92,7 @@ def connected_components(
             .agg(F.min("golden_id").alias("golden_id")),
             cfg["componentLabelsTable"],
             country_code,
-            f"labels_iter_{iteration:03d}",
+            f"{stage_prefix}_iter_{iteration:03d}",
             iteration,
         ).persist(StorageLevel.MEMORY_AND_DISK)
 
@@ -101,7 +103,7 @@ def connected_components(
         )
         labels.unpersist()
         labels = next_labels
-        print(f"  -> Connected component iteration {iteration}, changed={changed}")
+        print(f"  -> {stage_prefix} iteration {iteration}, changed={changed}")
         if not changed:
             neighbours.unpersist()
             return labels

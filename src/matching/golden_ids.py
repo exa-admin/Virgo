@@ -382,6 +382,97 @@ def persist_assignments(golden_ids: DataFrame, cfg: Dict[str, Any], country_code
     )
 
 
+# Standardized attributes captured on both sides of a change, so a reviewer can see what
+# the record looked like when it got each id.
+_TRACED_ATTRIBUTES = [("c_name", "Name"), ("c_address", "Address"), ("c_city", "City"), ("c_zip", "Zip")]
+
+
+def save_change_log(final_df: DataFrame, cfg: Dict[str, Any], country_code: str) -> int:
+    """Trace every OperatorConcatId whose golden id changed, and why.
+
+    ``MDMGoldenIdHistory`` records id-level remaps; this is the record-level counterpart:
+    one row per operator key that moved, carrying the previous run's matching data, this
+    run's, and a reason derived from what actually differs.
+
+    Reads the previous run's MDMMatchedResults slice, so it MUST be called before that
+    slice is overwritten. On the first run there is nothing to compare and it writes
+    nothing.
+    """
+    spark = final_df.sparkSession
+    key_column = cfg["rowRegistryKeyColumn"]
+    previous_columns = ["golden_id", "golden_id_source", "SourceGoldenRecordId", "final_match_rule", "match_group_size"]
+
+    previous = spark.table(cfg["matchedResultsTable"]).where(f"CountryCode = '{sql_literal(country_code)}'")
+    # MatchRunTimestamp only exists once this version has written the table at least once.
+    previous_run = (
+        F.col("MatchRunTimestamp") if "MatchRunTimestamp" in previous.columns else F.lit(None).cast("timestamp")
+    )
+    previous = previous.select(
+        F.col(key_column).alias("_key"),
+        *[F.col(c).alias(f"prev_{c}") for c in previous_columns],
+        *[F.col(source).alias(f"prev_{alias}") for source, alias in _TRACED_ATTRIBUTES],
+        previous_run.alias("prev_run"),
+    ).dropDuplicates(["_key"])
+
+    changed = final_df.filter(F.col("golden_id_changed")).join(
+        previous, F.col(key_column) == F.col("_key"), "left"
+    )
+
+    attributes_changed = None
+    for source, alias in _TRACED_ATTRIBUTES:
+        differs = ~F.coalesce(F.col(f"prev_{alias}"), F.lit("")).eqNullSafe(F.coalesce(F.col(source), F.lit("")))
+        attributes_changed = differs if attributes_changed is None else (attributes_changed | differs)
+
+    # First matching cause wins. Ordered root cause before symptom: a record that was
+    # renamed into an Informatica group changed because of the rename, not because the id
+    # it landed on happens to be Informatica's.
+    reason = (
+        F.when(
+            F.col("SourceGoldenRecordId").isNotNull()
+            & ~F.col("SourceGoldenRecordId").eqNullSafe(F.col("prev_SourceGoldenRecordId")),
+            F.lit("INFORMATICA_ID_CHANGED"),
+        )
+        .when(F.coalesce(attributes_changed, F.lit(False)), F.lit("SOURCE_DATA_CHANGED"))
+        .when(F.col("match_group_size") > F.col("prev_match_group_size"), F.lit("GROUP_GREW"))
+        .when(F.col("match_group_size") < F.col("prev_match_group_size"), F.lit("GROUP_SHRANK"))
+        .when(
+            (F.col("golden_id_source") == F.lit(GOLDEN_ID_SOURCE_INFORMATICA))
+            & (F.col("prev_golden_id_source") == F.lit(GOLDEN_ID_SOURCE_ENGINE)),
+            F.lit("INFORMATICA_ID_ADOPTED"),
+        )
+        .when(~F.col("final_match_rule").eqNullSafe(F.col("prev_final_match_rule")), F.lit("MATCH_RULE_CHANGED"))
+        .when(F.col("prev_golden_id").isNull(), F.lit("NO_PREVIOUS_RESULT"))
+        .otherwise(F.lit("REASSIGNED"))
+    )
+
+    log = changed.select(
+        F.lit(country_code).alias("CountryCode"),
+        F.col(key_column).cast("string").alias("OperatorConcatId"),
+        F.col("MDMRowId").cast("long").alias("MDMRowId"),
+        reason.alias("ChangeReason"),
+        F.col("previous_golden_id").cast("long").alias("PreviousGoldenId"),
+        F.col("golden_id").cast("long").alias("NewGoldenId"),
+        F.col("previous_golden_id_source").cast("string").alias("PreviousGoldenIdSource"),
+        F.col("golden_id_source").cast("string").alias("NewGoldenIdSource"),
+        F.col("prev_SourceGoldenRecordId").cast("long").alias("PreviousSourceGoldenRecordId"),
+        F.col("SourceGoldenRecordId").cast("long").alias("SourceGoldenRecordId"),
+        F.col("prev_final_match_rule").cast("string").alias("PreviousMatchRule"),
+        F.col("final_match_rule").cast("string").alias("NewMatchRule"),
+        F.col("prev_match_group_size").cast("long").alias("PreviousMatchGroupSize"),
+        F.col("match_group_size").cast("long").alias("NewMatchGroupSize"),
+        *[F.col(f"prev_{alias}").cast("string").alias(f"Previous{alias}") for _, alias in _TRACED_ATTRIBUTES],
+        *[F.col(source).cast("string").alias(f"New{alias}") for source, alias in _TRACED_ATTRIBUTES],
+        F.col("prev_run").cast("timestamp").alias("PreviousRunTimestamp"),
+        F.current_timestamp().alias("RunTimestamp"),
+    ).persist(StorageLevel.MEMORY_AND_DISK)
+
+    count = log.count()
+    if count > 0:
+        log.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(cfg["changeLogTable"])
+    log.unpersist()
+    return count
+
+
 def save_history(final_df: DataFrame, cfg: Dict[str, Any], country_code: str) -> int:
     """Append this run's old -> new golden id transitions to MDMGoldenIdHistory.
 

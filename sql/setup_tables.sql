@@ -112,6 +112,53 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMGoldenIdHis
 COMMENT 'Golden id remaps (old -> new) for downstream crosswalks';
 
 -- -----------------------------------------------------------------------------
+-- operator_golden_changelog — record-level golden id trace (AUDIT, append-only)
+-- MDMGoldenIdHistory answers "which ids remapped"; this answers "what happened to THIS
+-- OperatorConcatId, and why". One row per operator key whose golden id changed in a run,
+-- carrying the previous run's matching data next to the current run's.
+--
+-- ChangeReason (first matching cause wins, root causes before their symptoms):
+--   INFORMATICA_ID_CHANGED  Informatica issued a different GoldenRecordId for the row
+--   SOURCE_DATA_CHANGED     name / address / city / zip changed, so the rules saw
+--                           different input than last run — the usual root cause
+--   GROUP_GREW              more records in the group now (a merge pulled the row over)
+--   GROUP_SHRANK            fewer records in the group now (a split)
+--   INFORMATICA_ID_ADOPTED  row had an engine-minted id and now sits under an Informatica
+--                           one, with nothing else changed
+--   MATCH_RULE_CHANGED      same group size, but a different rule linked the row
+--   NO_PREVIOUS_RESULT      registry knew a prior id but MDMMatchedResults had no row
+--                           (results table was cleared, or first run after an upgrade)
+--   REASSIGNED              id moved with nothing else observably different — inspect
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.operator_golden_changelog (
+  CountryCode                   STRING,
+  OperatorConcatId              STRING,   -- the primary key being traced
+  MDMRowId                      BIGINT,
+  ChangeReason                  STRING,
+  PreviousGoldenId              BIGINT,
+  NewGoldenId                   BIGINT,
+  PreviousGoldenIdSource        STRING,
+  NewGoldenIdSource             STRING,
+  PreviousSourceGoldenRecordId  BIGINT,
+  SourceGoldenRecordId          BIGINT,
+  PreviousMatchRule             STRING,   -- ---- previous matching data ----
+  PreviousMatchGroupSize        BIGINT,
+  PreviousName                  STRING,
+  PreviousAddress               STRING,
+  PreviousCity                  STRING,
+  PreviousZip                   STRING,
+  NewMatchRule                  STRING,   -- ---- current matching data ----
+  NewMatchGroupSize             BIGINT,
+  NewName                       STRING,
+  NewAddress                    STRING,
+  NewCity                       STRING,
+  NewZip                        STRING,
+  PreviousRunTimestamp          TIMESTAMP,
+  RunTimestamp                  TIMESTAMP
+) USING DELTA
+COMMENT 'Record-level trace of golden id changes per OperatorConcatId, with cause';
+
+-- -----------------------------------------------------------------------------
 -- MDMRuleResults — per-rule match links (stewardship / audit)
 -- Stages written by the engine:
 --   000_Source_GoldenRecordId   RuleType 'source_golden' — Informatica grouping edges
@@ -287,10 +334,25 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchedResu
                                           -- for excluded records, 'Self/No Match' for singles
   is_matched                    BOOLEAN,
   is_group_anchor               BOOLEAN,
-  match_group_size              BIGINT
+  match_group_size              BIGINT,
+  -- Standardization inputs, always written (null-filled when a source lacks them). Declared
+  -- here rather than left to mergeSchema so the comparison views below are valid on a fresh
+  -- environment, before the first run has widened the table.
+  OperatorName                  STRING,
+  HouseNumberText               STRING,
+  StreetText                    STRING,
+  CityText                      STRING,
+  StateText                     STRING,
+  ZipCode                       STRING,
+  engine_match_id               BIGINT,   -- component id from OUR RULES ALONE, before the
+                                          -- Informatica groupings are hard-linked in. This is
+                                          -- what the over/undermatch views compare against:
+                                          -- golden_id cannot disagree with Informatica once
+                                          -- preserve_source_golden_groups forces those groups in.
+  MatchRunTimestamp             TIMESTAMP -- when this row was produced (drives changelog "previous run")
 ) USING DELTA
 COMMENT 'Matched results per country (schema widened at write via mergeSchema)';
--- Existing deployments: mergeSchema=true adds the new golden id columns on the next run.
+-- Existing deployments: mergeSchema=true adds the new columns on the next run.
 
 -- -----------------------------------------------------------------------------
 -- Externally populated (not created here):
@@ -303,3 +365,105 @@ COMMENT 'Matched results per country (schema widened at write via mergeSchema)';
 --         CountryName, latitude, longitude, ZipCode
 --       Optional filter column: match_found
 -- -----------------------------------------------------------------------------
+
+-- =============================================================================
+-- Informatica comparison views (AUDIT — hand these to the Informatica team)
+-- =============================================================================
+-- Both compare Informatica's SourceGoldenRecordId against `engine_match_id`, the
+-- grouping OUR RULES produced on their own.
+--
+-- Why not golden_id? With preserve_source_golden_groups = true (the default),
+-- Informatica's groupings are hard-linked into the graph before components run, so
+-- golden_id can never disagree with Informatica — comparing it would always report
+-- zero differences. engine_match_id is the engine's independent opinion, so it is the
+-- only honest basis for the comparison.
+--
+-- Records the engine deliberately skipped (invalid / dummy names, MDMMatchExclusions)
+-- have no engine links and so sit alone in engine_match_id. They are kept in the views
+-- and flagged by engine_skipped_record, because "Informatica matched a record we refuse
+-- to match" is usually worth seeing — filter it out when you only want rule disagreements.
+
+-- -----------------------------------------------------------------------------
+-- vw_informatica_undermatch — WE matched them, Informatica did NOT.
+-- Informatica is missing a match: these operators belong together.
+--   INFORMATICA_SPLIT_GROUPS  our group spans two or more Informatica golden ids
+--   INFORMATICA_MISSING_MEMBER  our group has one Informatica id plus records it never
+--                               gave an id to
+--   INFORMATICA_NEVER_MATCHED   our group is entirely unknown to Informatica
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW pds_auroradsar_prod.schema_informatica.vw_informatica_undermatch AS
+WITH engine_groups AS (
+  SELECT
+    CountryCode,
+    engine_match_id,
+    COUNT(*)                                                            AS engine_group_size,
+    COUNT(DISTINCT SourceGoldenRecordId)                                AS informatica_ids_in_group,
+    SUM(CASE WHEN SourceGoldenRecordId IS NULL THEN 1 ELSE 0 END)       AS records_without_informatica_id
+  FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults
+  GROUP BY CountryCode, engine_match_id
+)
+SELECT
+  r.CountryCode,
+  r.engine_match_id,
+  g.engine_group_size,
+  g.informatica_ids_in_group,
+  CASE
+    WHEN g.informatica_ids_in_group > 1 THEN 'INFORMATICA_SPLIT_GROUPS'
+    WHEN g.informatica_ids_in_group = 1 THEN 'INFORMATICA_MISSING_MEMBER'
+    ELSE 'INFORMATICA_NEVER_MATCHED'
+  END                                                                   AS undermatch_type,
+  r.OperatorConcatId,
+  r.SourceGoldenRecordId,
+  r.golden_id,
+  r.OperatorName,
+  r.StreetText,
+  r.CityText,
+  r.ZipCode,
+  r.StateText,
+  r.final_match_rule,
+  r.final_match_rule LIKE 'Excluded from Match%'                        AS engine_skipped_record,
+  r.MatchRunTimestamp
+FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults r
+JOIN engine_groups g
+  ON r.CountryCode = g.CountryCode
+ AND r.engine_match_id = g.engine_match_id
+WHERE g.engine_group_size > 1
+  AND (g.informatica_ids_in_group > 1 OR g.records_without_informatica_id > 0);
+
+-- -----------------------------------------------------------------------------
+-- vw_informatica_overmatch — Informatica matched them, WE did NOT.
+-- Informatica has grouped operators our rules found no evidence to link.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE VIEW pds_auroradsar_prod.schema_informatica.vw_informatica_overmatch AS
+WITH informatica_groups AS (
+  SELECT
+    CountryCode,
+    SourceGoldenRecordId,
+    COUNT(*)                          AS informatica_group_size,
+    COUNT(DISTINCT engine_match_id)   AS engine_groups_in_informatica_group
+  FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults
+  WHERE SourceGoldenRecordId IS NOT NULL
+  GROUP BY CountryCode, SourceGoldenRecordId
+)
+SELECT
+  r.CountryCode,
+  r.SourceGoldenRecordId,
+  g.informatica_group_size,
+  g.engine_groups_in_informatica_group,
+  r.engine_match_id,
+  r.OperatorConcatId,
+  r.golden_id,
+  r.OperatorName,
+  r.StreetText,
+  r.CityText,
+  r.ZipCode,
+  r.StateText,
+  r.final_match_rule,
+  r.final_match_rule LIKE 'Excluded from Match%'   AS engine_skipped_record,
+  r.MatchRunTimestamp
+FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults r
+JOIN informatica_groups g
+  ON r.CountryCode = g.CountryCode
+ AND r.SourceGoldenRecordId = g.SourceGoldenRecordId
+WHERE g.informatica_group_size > 1
+  AND g.engine_groups_in_informatica_group > 1;
