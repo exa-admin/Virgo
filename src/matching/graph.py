@@ -1,7 +1,7 @@
 """Connected components over the match graph, and Informatica group preservation.
 
 Both halves are min-label propagation, Spark-native (no UDFs, no GraphFrames), with each
-iteration checkpointed to MDMComponentLabels so the query plan never grows unbounded.
+iteration checkpointed to mdm_component_labels so the query plan never grows unbounded.
 
 **Components** — every record starts labelled with its own id and repeatedly takes the
 smallest label among its neighbours. Labels only ever decrease, so "no label changed" is
@@ -14,7 +14,7 @@ split a group and the group always keeps its id. When
 groups are removed instead: direct bridges (both endpoints carry different ids) before
 components, transitive ones (a new record linking two groups) after, by re-labelling the
 conflicted component from the Informatica ids as fixed seeds. All dropped edges land in
-MDMRuleResults stage ``999_Blocked_Source_GoldenRecordId_Merge`` for stewardship.
+mdm_rule_results stage ``999_Blocked_Source_GoldenRecordId_Merge`` for stewardship.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 
-from matching import io
+from matching import write
 from matching.config import (
     BLOCKED_SOURCE_GROUP_MERGE_RULE_STAGE,
     SOURCE_GOLDEN_GROUP_BLOCK_NAME,
@@ -32,7 +32,7 @@ from matching.config import (
     SOURCE_GOLDEN_GROUP_RULE_NAME,
     SOURCE_GOLDEN_GROUP_RULE_PRIORITY,
 )
-from matching.expressions import (
+from matching.helpers import (
     MATCH_LINK_BASE_COLUMNS,
     MATCH_LINK_COLUMNS,
     is_empty,
@@ -64,10 +64,10 @@ def connected_components(
 
     Partially propagated labels would split real components and mint wrong golden ids, so
     running out of iterations is a failure, not a result. ``stage_prefix`` names the
-    MDMComponentLabels checkpoints, so two passes in one run do not overwrite each other.
+    mdm_component_labels checkpoints, so two passes in one run do not overwrite each other.
     """
     max_iterations = int(cfg["components_max_iterations"])
-    labels = io.save_component_labels(
+    labels = write.save_component_labels(
         record_ids.select("record_id", F.col("record_id").alias("golden_id")).dropDuplicates(["record_id"]),
         cfg["componentLabelsTable"],
         country_code,
@@ -85,7 +85,7 @@ def connected_components(
             labels.select(F.col("record_id").alias("neighbor_id"), "golden_id"), "neighbor_id", "inner"
         ).select("record_id", "golden_id")
 
-        next_labels = io.save_component_labels(
+        next_labels = write.save_component_labels(
             labels.select("record_id", "golden_id")
             .unionByName(propagated)
             .groupBy("record_id")
@@ -248,7 +248,7 @@ def resolve_transitive_bridges(
     seeds = conflicted.select("record_id").join(ids, "record_id", "left").select(
         "record_id", F.col("SourceGoldenRecordId").alias("seed")
     )
-    labels = io.save_component_labels(
+    labels = write.save_component_labels(
         seeds.select("record_id", F.col("seed").alias("golden_id")),
         cfg["componentLabelsTable"],
         country_code,
@@ -269,7 +269,7 @@ def resolve_transitive_bridges(
             .groupBy("record_id")
             .agg(F.min("neighbor_label").alias("neighbor_label"))
         )
-        next_labels = io.save_component_labels(
+        next_labels = write.save_component_labels(
             labels.join(seeds, "record_id", "left")
             .join(neighbour_min, "record_id", "left")
             .select("record_id", F.coalesce(F.col("seed"), F.least(F.col("golden_id"), F.col("neighbor_label"))).alias("golden_id")),
@@ -321,7 +321,7 @@ def resolve_transitive_bridges(
     untouched = labelled.join(conflicted_components, "component_id", "left_anti").select(
         "record_id", F.col("component_id").alias("golden_id")
     )
-    resolved_components = io.save_component_labels(
+    resolved_components = write.save_component_labels(
         untouched.unionByName(resolved),
         cfg["componentLabelsTable"],
         country_code,
@@ -347,7 +347,7 @@ def remove_links(match_links: DataFrame, blocked_links: DataFrame) -> DataFrame:
 
 
 def save_blocked_links(blocked_links: DataFrame, reference: DataFrame, cfg: Dict[str, Any], country_code: str) -> int:
-    """Write blocked bridging edges to MDMRuleResults for stewardship; returns the row count.
+    """Write blocked bridging edges to mdm_rule_results for stewardship; returns the row count.
 
     The original ``match_rule`` / ``match_key`` are kept so stewards can see which rule
     wanted to bridge the groups. Columns beyond the base DDL arrive via mergeSchema.
@@ -384,7 +384,7 @@ def save_blocked_links(blocked_links: DataFrame, reference: DataFrame, cfg: Dict
             F.col("dst_source_golden_id").cast("long").alias("dst_source_golden_id"),
         )
     )
-    written = io.overwrite_slice(
+    written = write.overwrite_slice(
         slice_df,
         cfg["ruleResultsTable"],
         f"CountryCode = '{sql_literal(country_code)}' "

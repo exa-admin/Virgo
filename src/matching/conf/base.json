@@ -6,7 +6,7 @@
     "(or in a country file) to override storage.config for one environment. The test",
     "harness uses exactly that to point the engine at a scratch schema."
   ],
-  "EnrichDate": true,
+  "EnrichDate": false,
   "priorityMatching": true,
   "golden_id_floor": 100000000,
   "preserve_source_golden_groups": true,

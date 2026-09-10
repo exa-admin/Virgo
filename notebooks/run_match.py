@@ -1,210 +1,76 @@
 # Databricks notebook source
-# MAGIC %md
-# MAGIC # MDM Match — run one country or all countries
-# MAGIC
-# MAGIC Set the **countries** widget and run all cells.
-# MAGIC
-# MAGIC | Widget | Meaning |
-# MAGIC |---|---|
-# MAGIC | `countries` | `MY`, or `MY,SG,TH` for several, or `ALL` for every configured country |
-# MAGIC | `conf_dir` | Blank to use the configs bundled in the wheel; else a folder holding `base.json` + `countries/` |
-# MAGIC
-# MAGIC Prerequisites, once per environment:
-# MAGIC 1. Run `sql/setup_tables.sql`.
-# MAGIC 2. Install `mdm_engine-<version>-py3-none-any.whl` as a **cluster or job library**
-# MAGIC    (Compute → Libraries → Install new → Python whl). The `%pip` cell below is
-# MAGIC    commented out for exactly this case — leave it alone unless you need it.
-# MAGIC
-# MAGIC Every table this notebook reads comes from `conf/storage.config`; nothing is
-# MAGIC hardcoded here, so pointing that file at another schema repoints the whole notebook.
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Install the engine — only if it is NOT already a cluster library
-# MAGIC
-# MAGIC Left commented out on purpose, so **Run All** works out of the box on a cluster that
-# MAGIC already has the wheel installed.
-# MAGIC
-# MAGIC To use it: uncomment the line in the next cell (drop the leading `# `) and replace
-# MAGIC `<catalog>/<schema>/<volume>` with your Volume path. `%pip` must be the whole cell,
-# MAGIC so the path cannot come from a widget.
-
-# COMMAND ----------
-
-# MAGIC # %pip install --force-reinstall /Volumes/<catalog>/<schema>/<volume>/mdm_engine-0.1.0-py3-none-any.whl
-
-# COMMAND ----------
-
-# Databricks injects `spark`, `dbutils` and `display` into every notebook. This block is
-# never executed (TYPE_CHECKING is False at runtime) — it only tells the IDE where those
-# names come from, so editors stop reporting them as unresolved.
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from databricks.sdk.runtime import dbutils, display, spark
-
-# COMMAND ----------
-
-dbutils.widgets.text("countries", "MY", "Countries (CC, CC,CC or ALL)")
-dbutils.widgets.text("conf_dir", "", "Config folder (blank = bundled in wheel)")
-
-# COMMAND ----------
-
-import os
-
-conf_dir = dbutils.widgets.get("conf_dir").strip()
-if conf_dir:
-    # Point the engine at configs outside the wheel (Workspace / Volume / DBFS).
-    os.environ["MDM_CONF_DIR"] = conf_dir
-
-from matching import available_countries, run_country
-from matching.config import dataset_table, resolve_config
-
-requested = dbutils.widgets.get("countries").strip().upper()
-countries = available_countries() if requested == "ALL" else [c.strip() for c in requested.split(",") if c.strip()]
-
-print(f"Configured countries: {available_countries()}")
-print(f"Running: {countries}")
-
-# Table names for the reporting cells below come from conf/storage.config — never hardcode
-# them here, or this notebook silently reports on the wrong environment.
-storage = resolve_config(countries[0]) if countries else None
-CHANGELOG_TABLE = dataset_table(storage, "change_log") if storage else None
-UNDERMATCH_VIEW = dataset_table(storage, "informatica_undermatch") if storage else None
-OVERMATCH_VIEW = dataset_table(storage, "informatica_overmatch") if storage else None
-print(f"Target schema: {storage['target_schema'] if storage else '(none)'}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Run
-# MAGIC
-# MAGIC Each country is independent: it replaces only its own slice of the output tables, so
-# MAGIC one country failing does not corrupt the others. Failures are collected and re-raised
-# MAGIC at the end so a bad country does not stop the rest of the batch.
-
-# COMMAND ----------
-
-results, failures = {}, {}
-
-for country_code in countries:
-    print(f"\n{'=' * 70}\n{country_code}\n{'=' * 70}")
-    try:
-        results[country_code] = run_country(spark, country_code)
-    except Exception as error:  # noqa: BLE001 - report every country before failing
-        failures[country_code] = error
-        print(f"!! {country_code} FAILED: {type(error).__name__}: {error}")
-
-print(f"\nDone. Succeeded: {sorted(results)}  Failed: {sorted(failures)}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Summary per country
-# MAGIC
-# MAGIC `golden_id_changed` should be **0** while a country is still being served by
-# MAGIC Informatica — that column is the migration safety check.
-
-# COMMAND ----------
-
 from pyspark.sql import functions as F
 
-if results:
-    summary = None
-    for country_code, df in results.items():
-        row = df.agg(
-            F.lit(country_code).alias("country"),
-            F.count("*").alias("records"),
-            F.countDistinct("golden_id").alias("golden_ids"),
-            F.sum(F.col("is_matched").cast("int")).alias("matched"),
-            F.sum(F.col("golden_id_is_new").cast("int")).alias("new_golden_ids"),
-            F.sum(F.col("golden_id_changed").cast("int")).alias("golden_id_changed"),
-        )
-        summary = row if summary is None else summary.unionByName(row)
-    display(summary)
+from matching import run_country
+from matching.config import dataset_table, resolve_config
+
+COUNTRY = "MY"
+
+cfg = resolve_config(COUNTRY)
+print(cfg["target_schema"])
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Golden id changes traced this run
-# MAGIC
-# MAGIC Every `OperatorConcatId` whose golden id moved, with the previous run's matching
-# MAGIC data next to this run's and the reason it changed.
+df = run_country(spark, COUNTRY)
 
 # COMMAND ----------
 
-if results:
-    country_list = ", ".join(f"'{c}'" for c in sorted(results))
-    display(
-        spark.sql(f"""
-            SELECT ChangeReason, COUNT(*) AS records, COUNT(DISTINCT OperatorConcatId) AS operators
-            FROM {CHANGELOG_TABLE}
-            WHERE CountryCode IN ({country_list})
-              AND RunTimestamp >= current_timestamp() - INTERVAL 1 DAY
-            GROUP BY ChangeReason ORDER BY records DESC
-        """)
+display(
+    df.agg(
+        F.count("*").alias("records"),
+        F.countDistinct("golden_id").alias("golden_ids"),
+        F.sum(F.col("is_matched").cast("int")).alias("matched"),
+        F.sum(F.col("golden_id_is_new").cast("int")).alias("new_golden_ids"),
+        F.sum(F.col("golden_id_changed").cast("int")).alias("golden_id_changed"),
     )
+)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Where Informatica disagrees with us
-# MAGIC
-# MAGIC Hand these to the Informatica team. Both compare `engine_match_id` (what our rules
-# MAGIC found on their own) against Informatica's `GoldenRecordId` — see README for why
-# MAGIC `golden_id` cannot be used here.
+display(
+    df.select(
+        "OperatorConcatId",
+        "OperatorName",
+        "CityText",
+        "ZipCode",
+        "golden_id",
+        "golden_id_source",
+        "engine_match_id",
+        "match_group_size",
+        "is_matched",
+        "final_match_rule",
+        "golden_id_changed",
+    ).orderBy(F.col("match_group_size").desc(), "golden_id")
+)
 
 # COMMAND ----------
 
-if results:
-    country_list = ", ".join(f"'{c}'" for c in sorted(results))
-    print("UNDERMATCH — we matched them, Informatica did not:")
-    display(
-        spark.sql(f"""
-            SELECT * FROM {UNDERMATCH_VIEW}
-            WHERE CountryCode IN ({country_list})
-            ORDER BY engine_group_size DESC, engine_match_id
-        """)
-    )
+display(
+    spark.sql(f"""
+        SELECT ChangeReason, COUNT(*) AS records, COUNT(DISTINCT OperatorConcatId) AS operators
+        FROM {dataset_table(cfg, "change_log")}
+        WHERE CountryCode = '{COUNTRY}'
+        GROUP BY ChangeReason
+        ORDER BY records DESC
+    """)
+)
 
 # COMMAND ----------
 
-if results:
-    country_list = ", ".join(f"'{c}'" for c in sorted(results))
-    print("OVERMATCH — Informatica matched them, our rules found no evidence:")
-    display(
-        spark.sql(f"""
-            SELECT * FROM {OVERMATCH_VIEW}
-            WHERE CountryCode IN ({country_list})
-            ORDER BY informatica_group_size DESC, SourceGoldenRecordId
-        """)
-    )
+display(
+    spark.sql(f"""
+        SELECT * FROM {dataset_table(cfg, "informatica_undermatch")}
+        WHERE CountryCode = '{COUNTRY}'
+        ORDER BY engine_group_size DESC, engine_match_id
+    """)
+)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## Inspect one country's results
-# MAGIC
-# MAGIC Rule-level evidence lives in `MDMRuleResults` (accepted edges per rule) and
-# MAGIC `MDMRuleEvaluations` (every fuzzy candidate and its scores).
-
-# COMMAND ----------
-
-if results:
-    first_country = sorted(results)[0]
-    display(
-        results[first_country].select(
-            "OperatorConcatId",
-            "OperatorName",
-            "CityText",
-            "ZipCode",
-            "golden_id",
-            "golden_id_source",
-            "engine_match_id",
-            "match_group_size",
-            "is_matched",
-            "final_match_rule",
-            "golden_id_changed",
-        ).orderBy(F.col("match_group_size").desc(), "golden_id")
-    )
+display(
+    spark.sql(f"""
+        SELECT * FROM {dataset_table(cfg, "informatica_overmatch")}
+        WHERE CountryCode = '{COUNTRY}'
+        ORDER BY informatica_group_size DESC, SourceGoldenRecordId
+    """)
+)

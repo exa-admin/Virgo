@@ -11,11 +11,11 @@ survive. Per component ("cluster", keyed by TempClusterId):
    records holding it, then earliest candidate date, then smallest TempClusterId.
 3. Each cluster picks the best id it claimed: Informatica beats engine, then earliest
    date, then smallest id.
-4. Clusters left with nothing are minted a fresh id from ``MDMGoldenIdSequence``.
+4. Clusters left with nothing are minted a fresh id from ``mdm_golden_id_sequence``.
 
 Every tie-break is deterministic, so re-running on unchanged data yields identical ids.
-Chosen ids are written back to ``MDMRowRegistry`` (so the next run prefers them via
-tier 2) and old -> new transitions are appended to ``MDMGoldenIdHistory``.
+Chosen ids are written back to ``mdm_row_registry`` (so the next run prefers them via
+tier 2) and old -> new transitions are appended to ``mdm_golden_id_history``.
 
 With ``preserve_source_golden_groups`` (the default), an Informatica group is hard-linked
 before components run (``graph.build_group_links``), so step 2 never has to arbitrate an
@@ -30,9 +30,9 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-from matching import io
+from matching import read
 from matching.config import GOLDEN_ID_SOURCE_ENGINE, GOLDEN_ID_SOURCE_INFORMATICA
-from matching.expressions import is_empty, sql_literal
+from matching.helpers import is_empty, sql_literal
 
 # Columns pipeline._attach_row_registry adds for the previous run's assignment.
 PREVIOUS_GOLDEN_ID_COLUMN = "PreviousMDMGoldenId"
@@ -57,7 +57,7 @@ def collect_record_match_rules(match_links: DataFrame) -> DataFrame:
 def _registry_bounds(spark: SparkSession, cfg: Dict[str, Any]) -> Dict[str, Optional[int]]:
     """Highest golden ids the registry knows, across all countries (one global id space)."""
     row = (
-        io.read(spark, cfg, "row_registry")
+        read.read(spark, cfg, "row_registry")
         .agg(
             F.max(F.col("SourceGoldenRecordId").cast("long")).alias("max_source"),
             F.max(F.col("MDMGoldenId").cast("long")).alias("max_engine"),
@@ -78,7 +78,7 @@ def validate_golden_id_space(spark: SparkSession, cfg: Dict[str, Any]) -> None:
             "'golden_id_floor' in the country config (and keep it identical for all countries)."
         )
 
-    registry = io.read(spark, cfg, "row_registry")
+    registry = read.read(spark, cfg, "row_registry")
     engine_ids = (
         registry.filter(F.col("MDMGoldenIdSource") == F.lit(GOLDEN_ID_SOURCE_ENGINE))
         .select(F.col("MDMGoldenId").cast("long").alias("golden_id"))
@@ -96,7 +96,7 @@ def validate_golden_id_space(spark: SparkSession, cfg: Dict[str, Any]) -> None:
         raise ValueError(
             f"Engine-minted golden ids collide with Informatica SourceGoldenRecordId values (sample: {sample}). "
             "Informatica has produced ids inside the engine range; raise 'golden_id_floor' and remediate the "
-            "affected MDMRowRegistry rows before continuing."
+            "affected mdm_row_registry rows before continuing."
         )
 
 
@@ -115,7 +115,7 @@ def _reserve_id_range(spark: SparkSession, cfg: Dict[str, Any], count: int) -> i
 
     def read_mark() -> Optional[int]:
         row = (
-            io.read(spark, cfg, "golden_id_sequence")
+            read.read(spark, cfg, "golden_id_sequence")
             .filter(F.col("SequenceName") == F.lit(sequence_name))
             .select(F.col("NextValue").cast("long").alias("NextValue"))
             .first()
@@ -340,19 +340,19 @@ def validate_group_assignments(
             "With preserve_source_golden_groups every SourceGoldenRecordId must map to exactly one component whose "
             "golden id is Informatica-sourced"
             + ("" if allow_merge else " and equal to the SourceGoldenRecordId itself")
-            + ". No golden ids were written to MDMRowRegistry / MDMMatchedResults; inspect MDMMatchLinks / "
-            "MDMComponentLabels for this country."
+            + ". No golden ids were written to mdm_row_registry / mdm_matched_results; inspect mdm_match_links / "
+            "mdm_component_labels for this country."
         )
 
 
 def persist_assignments(golden_ids: DataFrame, cfg: Dict[str, Any], country_code: str) -> None:
-    """Write the chosen ids back to MDMRowRegistry.
+    """Write the chosen ids back to mdm_row_registry.
 
     ``MDMGoldenIdAssignedDate`` only moves when the id actually changes, so the tier-2
     "earliest assigned" tie-break stays stable across runs.
     """
     spark = golden_ids.sparkSession
-    view = "TmpMDMGoldenIdAssignments"
+    view = "tmp_mdm_golden_id_assignments"
     golden_ids.select(
         F.lit(country_code).alias("CountryCode"),
         F.col("record_id").cast("long").alias("MDMRowId"),
@@ -391,11 +391,11 @@ _TRACED_ATTRIBUTES = [("c_name", "Name"), ("c_address", "Address"), ("c_city", "
 def save_change_log(final_df: DataFrame, cfg: Dict[str, Any], country_code: str) -> int:
     """Trace every OperatorConcatId whose golden id changed, and why.
 
-    ``MDMGoldenIdHistory`` records id-level remaps; this is the record-level counterpart:
+    ``mdm_golden_id_history`` records id-level remaps; this is the record-level counterpart:
     one row per operator key that moved, carrying the previous run's matching data, this
     run's, and a reason derived from what actually differs.
 
-    Reads the previous run's MDMMatchedResults slice, so it MUST be called before that
+    Reads the previous run's mdm_matched_results slice, so it MUST be called before that
     slice is overwritten. On the first run there is nothing to compare and it writes
     nothing.
     """
@@ -403,7 +403,7 @@ def save_change_log(final_df: DataFrame, cfg: Dict[str, Any], country_code: str)
     key_column = cfg["rowRegistryKeyColumn"]
     previous_columns = ["golden_id", "golden_id_source", "SourceGoldenRecordId", "final_match_rule", "match_group_size"]
 
-    previous = io.read(spark, cfg, "matched_results").where(f"CountryCode = '{sql_literal(country_code)}'")
+    previous = read.read(spark, cfg, "matched_results").where(f"CountryCode = '{sql_literal(country_code)}'")
     # MatchRunTimestamp only exists once this version has written the table at least once.
     previous_run = (
         F.col("MatchRunTimestamp") if "MatchRunTimestamp" in previous.columns else F.lit(None).cast("timestamp")
@@ -475,7 +475,7 @@ def save_change_log(final_df: DataFrame, cfg: Dict[str, Any], country_code: str)
 
 
 def save_history(final_df: DataFrame, cfg: Dict[str, Any], country_code: str) -> int:
-    """Append this run's old -> new golden id transitions to MDMGoldenIdHistory.
+    """Append this run's old -> new golden id transitions to mdm_golden_id_history.
 
     ``old`` is the id the record carried before this run: the engine's prior assignment if
     any, else the Informatica id (so the first engine run also records how Informatica

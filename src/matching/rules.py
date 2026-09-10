@@ -6,7 +6,7 @@ Both passes produce the same link shape (``expressions.MATCH_LINK_COLUMNS``):
   emit star edges from the block's lowest record id. O(n) instead of O(n^2).
 * **fuzzy** — build candidate pairs from the rule's blocking keys, score them
   (Levenshtein / token Jaccard / exact), and keep the pairs the conditions accept. Every
-  candidate pair and its evidence is written to MDMRuleEvaluations, matched or not.
+  candidate pair and its evidence is written to mdm_rule_evaluations, matched or not.
 
 Both return a **persisted** DataFrame; the caller (``pipeline.run_match_waterfall``)
 unpersists it once the links have been merged.
@@ -25,8 +25,8 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
-from matching import io
-from matching.expressions import (
+from matching import write
+from matching.helpers import (
     apply_exclusion,
     compared_values,
     dedupe_match_links,
@@ -318,7 +318,7 @@ def run_fuzzy_rule(
         scored = _subject_flags(_score_pairs(candidates, rule, invalid_values), subject_ids)
         accepted = scored.filter(rule_matches(rule, invalid_values))
 
-        io.save_rule_evaluations(
+        write.save_rule_evaluations(
             scored.join(
                 accepted.select("src", "dst").dropDuplicates(["src", "dst"]).withColumn("_matched", F.lit(True)),
                 ["src", "dst"],

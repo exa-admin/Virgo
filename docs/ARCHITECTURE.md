@@ -19,10 +19,10 @@ flowchart TD
 
   H --> H1[Exact rules<br/>star edges + block caps]
   H --> H2[Fuzzy rules<br/>blocking + similarity]
-  H1 --> I[MDMRuleResults]
+  H1 --> I[mdm_rule_results]
   H2 --> I
-  H2 --> J[MDMRuleEvaluations]
-  H --> K[MDMMatchingState<br/>subjects / matched ids]
+  H2 --> J[mdm_rule_evaluations]
+  H --> K[mdm_matching_state<br/>subjects / matched ids]
 
   E --> SG[Source golden group links<br/>star edges per Informatica id<br/>all records, excluded included]
   SG --> I
@@ -30,22 +30,22 @@ flowchart TD
   BF -->|no| BD[Drop direct bridges<br/>two different Informatica ids]
   BD --> L
   BF -->|yes| L
-  L[MDMMatchLinks<br/>country replaceWhere]
+  L[mdm_match_links<br/>country replaceWhere]
   L --> M[graph.connected_components<br/>min-label iterations]
-  M --> N[MDMComponentLabels]
+  M --> N[mdm_component_labels]
   N --> BT{component holds > 1<br/>Informatica id?}
-  BT -->|yes, merges disallowed| BR[Seeded re-labelling<br/>drop transitive bridges<br/>rewrite MDMMatchLinks]
-  BR --> BL[MDMRuleResults<br/>999_Blocked_Source_GoldenRecordId_Merge]
+  BT -->|yes, merges disallowed| BR[Seeded re-labelling<br/>drop transitive bridges<br/>rewrite mdm_match_links]
+  BR --> BL[mdm_rule_results<br/>999_Blocked_Source_GoldenRecordId_Merge]
   BR --> O
   BT -->|no| O
   O[assign_golden_ids<br/>Informatica id > prior engine id > mint]
   O --> V[validate_group_assignments<br/>fail fast]
   E --> O
-  S[(MDMGoldenIdSequence)] --> O
-  O --> R[(MDMRowRegistry<br/>MDMGoldenId crosswalk)]
+  S[(mdm_golden_id_sequence)] --> O
+  O --> R[(mdm_row_registry<br/>MDMGoldenId crosswalk)]
   R --> O
-  O --> X[(MDMGoldenIdHistory<br/>old -> new remaps)]
-  O --> P[MDMMatchedResults<br/>golden_id + source + change flags]
+  O --> X[(mdm_golden_id_history<br/>old -> new remaps)]
+  O --> P[mdm_matched_results<br/>golden_id + source + change flags]
 ```
 
 ## Exact matching
@@ -67,11 +67,11 @@ For each fuzzy rule:
 2. Keep blocks sized within configured caps.
 3. Pair records inside each block; attach standardised fields.
 4. Compute Levenshtein / token-Jaccard evidence columns; evaluate rule `decision` (`all` / `any`).
-5. Optionally materialise **all** candidates (matched and not) into `MDMRuleEvaluations` with similarity **percentages**.
+5. Optionally materialise **all** candidates (matched and not) into `mdm_rule_evaluations` with similarity **percentages**.
 
 ## Connected components
 
-`graph.connected_components` seeds `golden_id = record_id`, then iteratively propagates the **minimum** neighbour label through a bidirectional edge list, writing each iteration to `MDMComponentLabels` until convergence or `max_iterations`.
+`graph.connected_components` seeds `golden_id = record_id`, then iteratively propagates the **minimum** neighbour label through a bidirectional edge list, writing each iteration to `mdm_component_labels` until convergence or `max_iterations`.
 
 `graph.connected_components` raises if the graph has not converged within `components_max_iterations` (default 30); partial labels are never used.
 
@@ -92,8 +92,8 @@ not part of an existing grouping get a new golden id.** Concretely:
 Engine-minted ids are of the same shape (BIGINT), globally unique, disjoint from
 Informatica's range, and stable across runs.
 Implementation: `graph.py` (hard links + components), `golden_ids.py` (selection),
-state in `MDMRowRegistry` (crosswalk), `MDMGoldenIdSequence` (allocator) and
-`MDMGoldenIdHistory` (XREF).
+state in `mdm_row_registry` (crosswalk), `mdm_golden_id_sequence` (allocator) and
+`mdm_golden_id_history` (XREF).
 
 ### Source golden groups as hard links (`graph.py`)
 
@@ -104,8 +104,8 @@ With `preserve_source_golden_groups` (default `true`):
    member, `match_rule = Source_GoldenRecordId`, `rule_priority = 0`, `edge_type =
    source_golden`, `block_name = source_golden_group`, `match_key` = the Informatica id,
    both endpoints flagged as rule subjects. No block-size cap.
-2. The edges are materialised to `MDMRuleResults` (stage `000_Source_GoldenRecordId`,
-   `RuleType = source_golden`) and unioned with the waterfall edges into `MDMMatchLinks`,
+2. The edges are materialised to `mdm_rule_results` (stage `000_Source_GoldenRecordId`,
+   `RuleType = source_golden`) and unioned with the waterfall edges into `mdm_match_links`,
    so they take part in connected components and appear in `final_match_rule`.
 3. They are deliberately **outside the priority waterfall**: they do not mark records as
    matched for later rules, so they never change which rule other records match on. A group
@@ -119,12 +119,12 @@ Cross-group merges (`allow_source_golden_group_merge`, MY default `false`):
   are only visible after components. Components holding more than one Informatica id are
   re-labelled with a seeded min-label propagation: records with an Informatica id keep their
   own id as label, others take the smallest label reachable through neighbours without an id
-  (stages `source_group_labels_*` in `MDMComponentLabels`). Edges whose endpoints end up with
+  (stages `source_group_labels_*` in `mdm_component_labels`). Edges whose endpoints end up with
   different labels are dropped; each label is then exactly one connected component
-  (stage `labels_source_groups_resolved`). `MDMMatchLinks` is rewritten without the dropped
+  (stage `labels_source_groups_resolved`). `mdm_match_links` is rewritten without the dropped
   edges. Unlabelled records in such a component are impossible; a non-converged propagation
   raises like `graph.connected_components`.
-- Every dropped edge is written to `MDMRuleResults` stage
+- Every dropped edge is written to `mdm_rule_results` stage
   `999_Blocked_Source_GoldenRecordId_Merge` (`RuleType = blocked`,
   `blocked_source_group_merge = true`, `src_source_golden_id` / `dst_source_golden_id` = the
   Informatica group each endpoint resolved to, original `match_rule` / `match_key` kept).
@@ -134,7 +134,7 @@ Cross-group merges (`allow_source_golden_group_merge`, MY default `false`):
 Trade-off: `false` guarantees that no Informatica id ever changes (safest for the
 migration cut-over and downstream crosswalks) at the cost of leaving true duplicates that
 Informatica had already separated as two golden records. `true` de-duplicates them but
-retires one Informatica id per merge (traceable in `MDMGoldenIdHistory`).
+retires one Informatica id per merge (traceable in `mdm_golden_id_history`).
 
 ### Registry crosswalk (`pipeline._attach_row_registry`)
 
@@ -167,7 +167,7 @@ For each connected component (`TempClusterId` = min `record_id`, purely internal
 4. **Mint**: components with no claimed id receive `base + row_number()` in
    `TempClusterId` order, where `base = max(golden_id_floor, sequence high-water mark,
    max(SourceGoldenRecordId)+1, max(MDMGoldenId)+1)` over the whole registry. The range is
-   reserved by a conditional MERGE on `MDMGoldenIdSequence` and read back, so a concurrent
+   reserved by a conditional MERGE on `mdm_golden_id_sequence` and read back, so a concurrent
    run cannot hand out the same numbers.
 
 All ranking is deterministic → identical input yields identical ids. Every id is the
@@ -211,9 +211,9 @@ only with `preserve_source_golden_groups`): for every Informatica id in the coun
 records are in exactly one component, that component's id is Informatica-sourced (never
 minted), and — unless merges are allowed — equals the Informatica id itself. A violation
 raises `RuntimeError`; the only side effect of the failed run is a burnt range in
-`MDMGoldenIdSequence` (a gap, like a database sequence).
+`mdm_golden_id_sequence` (a gap, like a database sequence).
 
-### Output columns in `MDMMatchedResults`
+### Output columns in `mdm_matched_results`
 
 `golden_id`, `golden_id_source`, `golden_id_is_new`, `previous_golden_id`,
 `previous_golden_id_source`, `golden_id_changed` (vs previous engine assignment),

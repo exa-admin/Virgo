@@ -135,7 +135,7 @@ class Harness:
         return self.spark.table(f"{TEST_SCHEMA}.{name}")
 
     def run(self, rows, country="MY"):
-        """Load `rows` as the source, then match. Returns MDMMatchedResults for the country."""
+        """Load `rows` as the source, then match. Returns mdm_matched_results for the country."""
         import datetime
 
         from matching import run_country
@@ -154,7 +154,7 @@ class Harness:
 
     def _assign_row_ids(self, country):
         """Local only: stand in for the Databricks IDENTITY column (see module docstring)."""
-        known = {r.OperatorConcatId for r in self.table("MDMRowRegistry").collect()}
+        known = {r.OperatorConcatId for r in self.table("mdm_row_registry").collect()}
         new = sorted(
             r.OperatorConcatId
             for r in self.table("source_operators").select("OperatorConcatId").distinct().collect()
@@ -167,14 +167,14 @@ class Harness:
         self.spark.createDataFrame(
             rows, "CountryCode string, MDMRowId bigint, OperatorConcatId string"
         ).write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(
-            f"{TEST_SCHEMA}.MDMRowRegistry"
+            f"{TEST_SCHEMA}.mdm_row_registry"
         )
 
     # ---- assertion helpers -------------------------------------------------------
 
     def rows_by_key(self, country="MY"):
-        """{OperatorConcatId: Row} from MDMMatchedResults."""
-        rows = self.table("MDMMatchedResults").where(f"CountryCode = '{country}'").collect()
+        """{OperatorConcatId: Row} from mdm_matched_results."""
+        rows = self.table("mdm_matched_results").where(f"CountryCode = '{country}'").collect()
         return {r.OperatorConcatId: r for r in rows}
 
     def golden(self, *concat_ids):

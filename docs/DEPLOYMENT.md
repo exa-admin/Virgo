@@ -19,10 +19,10 @@ hardcoded in Python, so this is the only file to edit when a deployment moves.
 
 "sources": {                                          // read-only; any format
   "operator": {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperator"},
-  "golden":   {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden"}
+  "golden":   {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgolden"}
 },
 "tables": {                                           // engine-owned; read AND written
-  "row_registry": {"format": "delta", "table": "${schema}.MDMRowRegistry"}
+  "row_registry": {"format": "delta", "table": "${schema}.mdm_row_registry"}
 }
 ```
 
@@ -56,7 +56,7 @@ Overrides, highest first:
 
 2. **Check the source views are readable:**
    - `sl_bdl_processed_cd_prod.cd.vw_ufsoperator` — operators to match
-   - `sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden` — golden masters
+   - `sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgolden` — golden masters
 
    Both are set in `conf/storage.config` under `sources`.
 
@@ -106,7 +106,7 @@ the wheel.
 ```python
 from matching import run_country, run_all
 
-run_country(spark, "MY")   # one country, returns its MDMMatchedResults slice
+run_country(spark, "MY")   # one country, returns its mdm_matched_results slice
 run_all(spark)             # every country with a config
 run_all(spark, ["MY", "SG"])
 ```
@@ -169,16 +169,16 @@ Everything is a country slice, so re-running one country is safe and idempotent.
 
 | Table | Contents |
 |---|---|
-| `MDMRowRegistry` | Stable `MDMRowId` per country + operator key; golden id crosswalk |
-| `MDMGoldenIdSequence` | High-water mark for engine-minted ids (one global row) |
-| `MDMGoldenIdHistory` | Append-only old → new id remaps per run (`MERGE` / `SPLIT`) |
-| `MDMRuleResults` | Accepted edges per rule stage, incl. blocked Informatica-group bridges |
-| `MDMRuleEvaluations` | Every fuzzy candidate pair and its scores, matched or not |
-| `MDMMatchExclusions` | Stewardship "do not match" keys (you populate this) |
-| `MDMMatchingState` | Intermediate id sets for the waterfall |
-| `MDMMatchLinks` | The final match graph |
-| `MDMComponentLabels` | Component labels per propagation iteration |
-| `MDMMatchedResults` | The output |
+| `mdm_row_registry` | Stable `MDMRowId` per country + operator key; golden id crosswalk |
+| `mdm_golden_id_sequence` | High-water mark for engine-minted ids (one global row) |
+| `mdm_golden_id_history` | Append-only old → new id remaps per run (`MERGE` / `SPLIT`) |
+| `mdm_rule_results` | Accepted edges per rule stage, incl. blocked Informatica-group bridges |
+| `mdm_rule_evaluations` | Every fuzzy candidate pair and its scores, matched or not |
+| `mdm_match_exclusions` | Stewardship "do not match" keys (you populate this) |
+| `mdm_matching_state` | Intermediate id sets for the waterfall |
+| `mdm_match_links` | The final match graph |
+| `mdm_component_labels` | Component labels per propagation iteration |
+| `mdm_matched_results` | The output |
 
 ## Troubleshooting
 
@@ -188,5 +188,5 @@ Everything is a country slice, so re-running one country is safe and idempotent.
 | `Table … is missing required columns` | Tables were created from an older setup SQL — re-run it |
 | `Missing country config: …` | No `countries/{CC}.json`; copy `template.json` |
 | `did not converge within N iterations` | A match chain is longer than the budget — raise `components_max_iterations` |
-| `Informatica golden groupings … would not be preserved` | A safety check fired; nothing was written. Inspect `MDMMatchLinks` / `MDMComponentLabels` for the country |
+| `Informatica golden groupings … would not be preserved` | A safety check fired; nothing was written. Inspect `mdm_match_links` / `mdm_component_labels` for the country |
 | `Informatica SourceGoldenRecordId values reach …` | Informatica has entered the engine id range — raise `golden_id_floor` everywhere |

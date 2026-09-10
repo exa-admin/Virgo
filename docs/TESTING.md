@@ -2,7 +2,7 @@
 
 The test suite runs on a Databricks cluster. Each test builds a throwaway schema from the
 real `sql/setup_tables.sql`, loads a small dummy operator population, runs the real
-`run_country` with the real MY rules from `MY.json`, asserts on `MDMMatchedResults`, then
+`run_country` with the real MY rules from `MY.json`, asserts on `mdm_matched_results`, then
 drops the schema. DDL, config and engine are covered together.
 
 > **The suite drops and recreates its schema between tests.** Point it at a scratch schema.
@@ -87,8 +87,8 @@ most damaging kind of regression. Rerun that one test with `-vv -s` to see the e
 stage-by-stage output, then inspect the leftover evidence in your scratch schema:
 
 ```sql
-SELECT * FROM pds_auroradsar_dev.mdm_test.MDMRuleEvaluations WHERE IsMatched;
-SELECT * FROM pds_auroradsar_dev.mdm_test.MDMRuleResults ORDER BY RuleExecutionOrder;
+SELECT * FROM pds_auroradsar_dev.mdm_test.mdm_rule_evaluations WHERE IsMatched;
+SELECT * FROM pds_auroradsar_dev.mdm_test.mdm_rule_results ORDER BY RuleExecutionOrder;
 ```
 
 The fixture drops the schema at the end of each test, so add `--pdb` or comment out the

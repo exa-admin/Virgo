@@ -5,7 +5,7 @@
 -- Parameterize catalog/schema per environment before running, e.g.:
 --   REPLACE pds_auroradsar_prod.schema_informatica WITH <catalog>.<schema>
 --
--- Source views (sl_bdl_processed_cd_prod.cd.vw_ufsoperator and ...vw_ufsoperatorgoden,
+-- Source views (sl_bdl_processed_cd_prod.cd.vw_ufsoperator and ...vw_ufsoperatorgolden,
 -- configured via src/matching/conf/base.json source/golden_source) and enrichment table
 -- (mdmenrichedoperators) are externally populated and are NOT created here.
 -- =============================================================================
@@ -13,7 +13,7 @@
 CREATE SCHEMA IF NOT EXISTS pds_auroradsar_prod.schema_informatica;
 
 -- -----------------------------------------------------------------------------
--- MDMRowRegistry
+-- mdm_row_registry
 -- Stable per-country surrogate keys (MDMRowId) for OperatorConcatId, plus the
 -- golden id crosswalk used for Informatica -> engine continuity:
 --   SourceGoldenRecordId     last NON-NULL Informatica GoldenRecordId seen for the
@@ -36,7 +36,7 @@ CREATE SCHEMA IF NOT EXISTS pds_auroradsar_prod.schema_informatica;
 --     BIGINT NOT NULL and pre-populate / generate IDs before MERGE, or use a
 --     sequence + DEFAULT — the engine expects MDMRowId to be present after MERGE.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMRowRegistry (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_row_registry (
   CountryCode           STRING        NOT NULL,
   MDMRowId              BIGINT        GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1),
   OperatorConcatId      STRING        NOT NULL,
@@ -51,16 +51,16 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMRowRegistry
 COMMENT 'Stable MDM row keys per country / OperatorConcatId + golden id crosswalk';
 
 -- Migration for deployments created before the golden id crosswalk existed:
--- ALTER TABLE pds_auroradsar_prod.schema_informatica.MDMRowRegistry
+-- ALTER TABLE pds_auroradsar_prod.schema_informatica.mdm_row_registry
 --   ADD COLUMNS (MDMGoldenId BIGINT, MDMGoldenIdSource STRING, MDMGoldenIdAssignedDate TIMESTAMP);
 --
--- Optional one-off backfill so ids already published from MDMMatchedResults by the
+-- Optional one-off backfill so ids already published from mdm_matched_results by the
 -- previous (offset-based) engine are carried forward instead of re-minted. Only do
 -- this if downstream systems consumed those ids; review before running.
--- MERGE INTO pds_auroradsar_prod.schema_informatica.MDMRowRegistry AS t
+-- MERGE INTO pds_auroradsar_prod.schema_informatica.mdm_row_registry AS t
 -- USING (
 --   SELECT CountryCode, MDMRowId, golden_id, SourceGoldenRecordId
---   FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults
+--   FROM pds_auroradsar_prod.schema_informatica.mdm_matched_results
 -- ) AS s
 -- ON t.CountryCode = s.CountryCode AND t.MDMRowId = s.MDMRowId
 -- WHEN MATCHED AND t.MDMGoldenId IS NULL THEN UPDATE SET
@@ -71,7 +71,7 @@ COMMENT 'Stable MDM row keys per country / OperatorConcatId + golden id crosswal
 -- range; validate_golden_id_space will refuse to run if any collide.
 
 -- -----------------------------------------------------------------------------
--- MDMGoldenIdSequence — high-water mark for engine-minted golden ids
+-- mdm_golden_id_sequence — high-water mark for engine-minted golden ids
 -- One global row (SequenceName = 'MDMGoldenId'); ids are a single space across
 -- countries. The engine reserves ranges with a conditional MERGE and reads back.
 -- Seed the row at or above the configured golden_id_floor (default 100000000 = 1e8;
@@ -80,7 +80,7 @@ COMMENT 'Stable MDM row keys per country / OperatorConcatId + golden id crosswal
 -- allocator takes max(floor, NextValue, ...), an existing higher NextValue is never
 -- lowered — the floor may only ever be raised.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMGoldenIdSequence (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_golden_id_sequence (
   SequenceName   STRING     NOT NULL,
   NextValue      BIGINT     NOT NULL,
   DateUpdated    TIMESTAMP
@@ -88,20 +88,20 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMGoldenIdSeq
 COMMENT 'Golden id allocator high-water mark (next unassigned value)';
 
 -- Idempotent seed (optional: the engine inserts the row itself on first allocation).
-MERGE INTO pds_auroradsar_prod.schema_informatica.MDMGoldenIdSequence AS t
+MERGE INTO pds_auroradsar_prod.schema_informatica.mdm_golden_id_sequence AS t
 USING (SELECT 'MDMGoldenId' AS SequenceName, CAST(100000000 AS BIGINT) AS NextValue) AS s
 ON t.SequenceName = s.SequenceName
 WHEN NOT MATCHED THEN INSERT (SequenceName, NextValue, DateUpdated)
 VALUES (s.SequenceName, s.NextValue, current_timestamp());
 
 -- -----------------------------------------------------------------------------
--- MDMGoldenIdHistory — append-only XREF of golden id transitions per run
+-- mdm_golden_id_history — append-only XREF of golden id transitions per run
 --   Reason = 'MERGE' : OldGoldenId retired, all its records now carry NewGoldenId
 --   Reason = 'SPLIT' : OldGoldenId still lives on another cluster; RecordCount
 --                      records moved from it to NewGoldenId (record-level detail is
---                      in MDMMatchedResults.previous_golden_id for that run)
+--                      in mdm_matched_results.previous_golden_id for that run)
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMGoldenIdHistory (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_golden_id_history (
   CountryCode    STRING     NOT NULL,
   OldGoldenId    BIGINT     NOT NULL,
   NewGoldenId    BIGINT     NOT NULL,
@@ -113,7 +113,7 @@ COMMENT 'Golden id remaps (old -> new) for downstream crosswalks';
 
 -- -----------------------------------------------------------------------------
 -- operator_golden_changelog — record-level golden id trace (AUDIT, append-only)
--- MDMGoldenIdHistory answers "which ids remapped"; this answers "what happened to THIS
+-- mdm_golden_id_history answers "which ids remapped"; this answers "what happened to THIS
 -- OperatorConcatId, and why". One row per operator key whose golden id changed in a run,
 -- carrying the previous run's matching data next to the current run's.
 --
@@ -126,7 +126,7 @@ COMMENT 'Golden id remaps (old -> new) for downstream crosswalks';
 --   INFORMATICA_ID_ADOPTED  row had an engine-minted id and now sits under an Informatica
 --                           one, with nothing else changed
 --   MATCH_RULE_CHANGED      same group size, but a different rule linked the row
---   NO_PREVIOUS_RESULT      registry knew a prior id but MDMMatchedResults had no row
+--   NO_PREVIOUS_RESULT      registry knew a prior id but mdm_matched_results had no row
 --                           (results table was cleared, or first run after an upgrade)
 --   REASSIGNED              id moved with nothing else observably different — inspect
 -- -----------------------------------------------------------------------------
@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.operator_golde
 COMMENT 'Record-level trace of golden id changes per OperatorConcatId, with cause';
 
 -- -----------------------------------------------------------------------------
--- MDMRuleResults — per-rule match links (stewardship / audit)
+-- mdm_rule_results — per-rule match links (stewardship / audit)
 -- Stages written by the engine:
 --   000_Source_GoldenRecordId   RuleType 'source_golden' — Informatica grouping edges
 --                               (preserve_source_golden_groups); match_key = the
@@ -169,11 +169,11 @@ COMMENT 'Record-level trace of golden id changes per OperatorConcatId, with caus
 --                               RuleType 'blocked' — engine edges DROPPED because they
 --                               would merge two Informatica groups
 --                               (allow_source_golden_group_merge = false). Not part of
---                               MDMMatchLinks. blocked_source_group_merge = true and
+--                               mdm_match_links. blocked_source_group_merge = true and
 --                               src/dst_source_golden_id give the Informatica group each
 --                               endpoint belongs to (resolved group for transitive bridges).
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMRuleResults (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_rule_results (
   CountryCode                 STRING,
   RuleType                    STRING,
   RuleStageName               STRING,
@@ -196,14 +196,14 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMRuleResults
 COMMENT 'Materialized match links per rule stage (+ blocked Informatica group bridges)';
 -- Existing deployments: the engine writes with mergeSchema=true, so the three blocked-*
 -- columns are added automatically on the first run; or run
--- ALTER TABLE pds_auroradsar_prod.schema_informatica.MDMRuleResults
+-- ALTER TABLE pds_auroradsar_prod.schema_informatica.mdm_rule_results
 --   ADD COLUMNS (blocked_source_group_merge BOOLEAN, src_source_golden_id BIGINT, dst_source_golden_id BIGINT);
 
 -- -----------------------------------------------------------------------------
--- MDMRuleEvaluations — fuzzy candidate evidence (matched and non-matched)
+-- mdm_rule_evaluations — fuzzy candidate evidence (matched and non-matched)
 -- Similarity columns are stored as INT percentages (0–100) by the engine.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMRuleEvaluations (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_rule_evaluations (
   CountryCode                     STRING,
   RuleType                        STRING,
   RuleStageName                   STRING,
@@ -248,9 +248,9 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMRuleEvaluat
 COMMENT 'Fuzzy rule candidate evaluations with similarity evidence';
 
 -- -----------------------------------------------------------------------------
--- MDMMatchExclusions — stewardship exclusions from matching
+-- mdm_match_exclusions — stewardship exclusions from matching
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchExclusions (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_match_exclusions (
   CountryCode        STRING        NOT NULL,
   OperatorConcatId   STRING        NOT NULL,
   ExclusionDate      TIMESTAMP,
@@ -259,9 +259,9 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchExclus
 COMMENT 'Records excluded from match (stewardship)';
 
 -- -----------------------------------------------------------------------------
--- MDMMatchingState — intermediate record-id sets for waterfall / grouping
+-- mdm_matching_state — intermediate record-id sets for waterfall / grouping
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchingState (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_matching_state (
   CountryCode   STRING,
   StateName     STRING,
   StateType     STRING,
@@ -270,11 +270,11 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchingSta
 COMMENT 'Ephemeral matching state slices (active subjects, matched ids, etc.)';
 
 -- -----------------------------------------------------------------------------
--- MDMMatchLinks — final undirected match edges for a country run
+-- mdm_match_links — final undirected match edges for a country run
 -- Includes the Source_GoldenRecordId edges (edge_type 'source_golden') and excludes
--- edges dropped as Informatica group bridges (see MDMRuleResults 999_Blocked_* stage).
+-- edges dropped as Informatica group bridges (see mdm_rule_results 999_Blocked_* stage).
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchLinks (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_match_links (
   CountryCode           STRING,
   src                   BIGINT,
   dst                   BIGINT,
@@ -289,7 +289,7 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchLinks 
 COMMENT 'Country-scoped match link graph edges';
 
 -- -----------------------------------------------------------------------------
--- MDMComponentLabels — connected-component label iterations
+-- mdm_component_labels — connected-component label iterations
 -- LabelStageName: labels_initial / labels_iter_NNN (min-label propagation);
 --   source_group_labels_initial / source_group_labels_iter_NNN (seeded propagation of
 --   Informatica ids inside components that bridged several groups; golden_id = the
@@ -298,7 +298,7 @@ COMMENT 'Country-scoped match link graph edges';
 --   source_group_* stages only exist when allow_source_golden_group_merge = false
 --   and a bridge was actually detected.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMComponentLabels (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_component_labels (
   CountryCode       STRING,
   LabelStageName    STRING,
   IterationNumber   INT,
@@ -308,12 +308,12 @@ CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMComponentLa
 COMMENT 'Iterative min-label propagation checkpoints';
 
 -- -----------------------------------------------------------------------------
--- MDMMatchedResults — country-partitioned matched output (mergeSchema=true)
+-- mdm_matched_results — country-partitioned matched output (mergeSchema=true)
 -- Engine overwrites WHERE CountryCode = 'XX' and may widen schema from source.
 -- Minimal required column: CountryCode. Other columns come from the source
 -- plus engine-added match attributes.
 -- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.MDMMatchedResults (
+CREATE TABLE IF NOT EXISTS pds_auroradsar_prod.schema_informatica.mdm_matched_results (
   CountryCode                   STRING,
   record_id                     BIGINT,
   MDMRowId                      BIGINT,
@@ -357,7 +357,7 @@ COMMENT 'Matched results per country (schema widened at write via mergeSchema)';
 -- -----------------------------------------------------------------------------
 -- Externally populated (not created here):
 --   sl_bdl_processed_cd_prod.cd.vw_ufsoperator      — source operators (population)
---   sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden — golden masters (already matched)
+--   sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgolden — golden masters (already matched)
 --   pds_auroradsar_prod.schema_informatica.mdmenrichedoperators
 --       Expected join key: OperatorConcatId
 --       Columns used when EnrichDate=true (see ENRICHMENT_COLUMN_MAPPINGS):
@@ -378,7 +378,7 @@ COMMENT 'Matched results per country (schema widened at write via mergeSchema)';
 -- zero differences. engine_match_id is the engine's independent opinion, so it is the
 -- only honest basis for the comparison.
 --
--- Records the engine deliberately skipped (invalid / dummy names, MDMMatchExclusions)
+-- Records the engine deliberately skipped (invalid / dummy names, mdm_match_exclusions)
 -- have no engine links and so sit alone in engine_match_id. They are kept in the views
 -- and flagged by engine_skipped_record, because "Informatica matched a record we refuse
 -- to match" is usually worth seeing — filter it out when you only want rule disagreements.
@@ -399,7 +399,7 @@ WITH engine_groups AS (
     COUNT(*)                                                            AS engine_group_size,
     COUNT(DISTINCT SourceGoldenRecordId)                                AS informatica_ids_in_group,
     SUM(CASE WHEN SourceGoldenRecordId IS NULL THEN 1 ELSE 0 END)       AS records_without_informatica_id
-  FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults
+  FROM pds_auroradsar_prod.schema_informatica.mdm_matched_results
   GROUP BY CountryCode, engine_match_id
 )
 SELECT
@@ -423,7 +423,7 @@ SELECT
   r.final_match_rule,
   r.final_match_rule LIKE 'Excluded from Match%'                        AS engine_skipped_record,
   r.MatchRunTimestamp
-FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults r
+FROM pds_auroradsar_prod.schema_informatica.mdm_matched_results r
 JOIN engine_groups g
   ON r.CountryCode = g.CountryCode
  AND r.engine_match_id = g.engine_match_id
@@ -441,7 +441,7 @@ WITH informatica_groups AS (
     SourceGoldenRecordId,
     COUNT(*)                          AS informatica_group_size,
     COUNT(DISTINCT engine_match_id)   AS engine_groups_in_informatica_group
-  FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults
+  FROM pds_auroradsar_prod.schema_informatica.mdm_matched_results
   WHERE SourceGoldenRecordId IS NOT NULL
   GROUP BY CountryCode, SourceGoldenRecordId
 )
@@ -461,7 +461,7 @@ SELECT
   r.final_match_rule,
   r.final_match_rule LIKE 'Excluded from Match%'   AS engine_skipped_record,
   r.MatchRunTimestamp
-FROM pds_auroradsar_prod.schema_informatica.MDMMatchedResults r
+FROM pds_auroradsar_prod.schema_informatica.mdm_matched_results r
 JOIN informatica_groups g
   ON r.CountryCode = g.CountryCode
  AND r.SourceGoldenRecordId = g.SourceGoldenRecordId

@@ -15,7 +15,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-# Columns of a match link as persisted to MDMMatchLinks / MDMRuleResults.
+# Columns of a match link as persisted to mdm_match_links / mdm_rule_results.
 MATCH_LINK_BASE_COLUMNS = [
     "src",
     "dst",
@@ -27,7 +27,7 @@ MATCH_LINK_BASE_COLUMNS = [
     "src_is_rule_subject",
     "dst_is_rule_subject",
 ]
-# Evidence columns a link carries in flight (dropped when persisted to MDMMatchLinks).
+# Evidence columns a link carries in flight (dropped when persisted to mdm_match_links).
 MATCH_LINK_EVIDENCE_COLUMNS = [
     "NameLevenshteinSimilarity",
     "AddressLevenshteinSimilarity",

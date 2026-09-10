@@ -16,7 +16,7 @@ already issued must never change.**
 
 | | |
 |---|---|
-| Engine | `src/matching/` — 9 modules; `pipeline.py` orchestrates, `rules.py` matches, `graph.py` groups, `golden_ids.py` assigns |
+| Engine | `src/matching/` — one module per step: `read` → `registry` → `standardize` → `rules` → `graph` → `golden_ids`, with `match_pipeline.py` orchestrating and `write.py` doing every Delta write |
 | Storage | `src/matching/conf/storage.config` — **every** table, view and path, in one file |
 | Config | `src/matching/conf/base.json` + `conf/countries/{CC}.json` (inside the package, ships in the wheel) |
 | DDL | `sql/setup_tables.sql` |

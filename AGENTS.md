@@ -38,27 +38,27 @@ Point your IDE's interpreter at `.venv/bin/python`. That is the whole setup.
 
 ## High-level pipeline
 
-1. **Load** source via `matching.io.read_source_population` (kept separate so the
+1. **Load** source via `matching.read.read_source_population` (kept separate so the
    input can be Delta/CSV/Parquet): the operator view (`sl_bdl_processed_cd_prod.cd.vw_ufsoperator`,
-   the population to match) plus the golden view (`…vw_ufsoperatorgoden`, already-matched
+   the population to match) plus the golden view (`…vw_ufsoperatorgolden`, already-matched
    masters) — golden masters absent from the operator feed are backfilled with a synthetic
    `OperatorConcatId` (`GRID_<GoldenRecordId>`) so their group is never lost. Filtered by country.
 2. **Enrich** (optional) from `mdmenrichedoperators` when `EnrichDate` is true.
-3. **Row registry** MERGE into `MDMRowRegistry` → assign `MDMRowId` / `record_id`.
+3. **Row registry** MERGE into `mdm_row_registry` → assign `MDMRowId` / `record_id`.
 4. **Standardize** match attributes (`c_name`, `c_zip`, `c_address`, soundex/prefix, …).
-5. **Exclude** via config filters + `MDMMatchExclusions`.
-6. **Exact / fuzzy waterfall** (`priorityMatching`) → per-rule links in `MDMRuleResults` / evaluations in `MDMRuleEvaluations`.
-7. **Source golden group links** (`preserve_source_golden_groups`): star edges over every Informatica `SourceGoldenRecordId` shared by ≥ 2 records (all records, excluded ones included) → `MDMRuleResults` stage `000_Source_GoldenRecordId`; engine edges that directly bridge two Informatica groups are dropped when `allow_source_golden_group_merge` is false.
-8. **Match links** country slice → `MDMMatchLinks`.
-9. **Connected components** (native min-label iteration) → `MDMComponentLabels`; then, if merges are disallowed, components still holding several Informatica ids are re-labelled along group lines and the bridging edges are dropped (`MDMRuleResults` stage `999_Blocked_Source_GoldenRecordId_Merge`, `MDMMatchLinks` rewritten).
-10. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`MDMRowRegistry.MDMGoldenId`), else mint from `MDMGoldenIdSequence`. `validate_group_assignments` fails fast if an Informatica group was split/renamed. Assignments are written back to `MDMRowRegistry`; remaps go to `MDMGoldenIdHistory`.
-11. **Matched results** → `MDMMatchedResults` (`replaceWhere` country), after appending
+5. **Exclude** via config filters + `mdm_match_exclusions`.
+6. **Exact / fuzzy waterfall** (`priorityMatching`) → per-rule links in `mdm_rule_results` / evaluations in `mdm_rule_evaluations`.
+7. **Source golden group links** (`preserve_source_golden_groups`): star edges over every Informatica `SourceGoldenRecordId` shared by ≥ 2 records (all records, excluded ones included) → `mdm_rule_results` stage `000_Source_GoldenRecordId`; engine edges that directly bridge two Informatica groups are dropped when `allow_source_golden_group_merge` is false.
+8. **Match links** country slice → `mdm_match_links`.
+9. **Connected components** (native min-label iteration) → `mdm_component_labels`; then, if merges are disallowed, components still holding several Informatica ids are re-labelled along group lines and the bridging edges are dropped (`mdm_rule_results` stage `999_Blocked_Source_GoldenRecordId_Merge`, `mdm_match_links` rewritten).
+10. **Golden IDs** with Informatica continuity: per component prefer an Informatica `SourceGoldenRecordId`, else the engine id assigned on a previous run (`mdm_row_registry.MDMGoldenId`), else mint from `mdm_golden_id_sequence`. `validate_group_assignments` fails fast if an Informatica group was split/renamed. Assignments are written back to `mdm_row_registry`; remaps go to `mdm_golden_id_history`.
+11. **Matched results** → `mdm_matched_results` (`replaceWhere` country), after appending
  record-level golden id changes to `operator_golden_changelog` (that step reads the
  PREVIOUS slice, so it must stay before the overwrite).
 
 A second, engine-only components pass (`stage_prefix="engine_labels"`) runs on the
 waterfall links **before** the Informatica group links are added, and lands in
-`MDMMatchedResults.engine_match_id`. It exists solely so the over/undermatch views have
+`mdm_matched_results.engine_match_id`. It exists solely so the over/undermatch views have
 something to compare Informatica against — `golden_id` cannot disagree with Informatica
 once `preserve_source_golden_groups` hard-links those groups. Do not "optimise" it away.
 
@@ -82,7 +82,7 @@ The company replaces Informatica MDM **country by country**. Hard requirements:
 3. **Two Informatica groups bridged by engine rules**: with `allow_source_golden_group_merge =
  false` (MY default) the bridging edges are dropped (direct bridges before components,
  transitive bridges via a seeded re-labelling after components) and written to
- `MDMRuleResults` stage `999_Blocked_Source_GoldenRecordId_Merge` for stewardship — no
+ `mdm_rule_results` stage `999_Blocked_Source_GoldenRecordId_Merge` for stewardship — no
  Informatica id ever changes. With `true`, the component keeps one id (earliest
  `GoldenIDCreatedDate`, then smallest) and the other is logged as `MERGE`.
 4. For a migrated country the source `GoldenRecordId` may go NULL: the registry MERGE never
@@ -97,7 +97,7 @@ prior `ENGINE` id (earliest `MDMGoldenIdAssignedDate`, then smallest) → mint. 
 several components is claimed by the one with most incumbent records (then most records,
 earliest date, smallest `TempClusterId`); the others get their own prior id or a new one
 (with preserved groups this only ever concerns engine ids).
-Merges/splits are logged to `MDMGoldenIdHistory` (`Reason` = `MERGE` | `SPLIT`).
+Merges/splits are logged to `mdm_golden_id_history` (`Reason` = `MERGE` | `SPLIT`).
 Full description: `docs/ARCHITECTURE.md` → "Golden IDs (Informatica continuity)".
 
 Public API:
@@ -110,18 +110,18 @@ from matching import run_country, run_all, load_country_config, available_countr
 
 | Table | Role |
 |-------|------|
-| `MDMRowRegistry` | Stable `MDMRowId` IDENTITY keys per `CountryCode` + `OperatorConcatId`; golden id crosswalk (`SourceGoldenRecordId`, `MDMGoldenId`, `MDMGoldenIdSource`, `MDMGoldenIdAssignedDate`) |
-| `MDMGoldenIdSequence` | High-water mark for engine-minted golden ids (single global row) |
-| `MDMGoldenIdHistory` | Append-only old → new golden id remaps per run (`MERGE` / `SPLIT`) |
-| `MDMRuleResults` | Accepted match edges per rule stage (incl. `000_Source_GoldenRecordId`); dropped Informatica-group bridges in stage `999_Blocked_Source_GoldenRecordId_Merge` (`blocked_source_group_merge`) |
-| `MDMRuleEvaluations` | Fuzzy candidate evidence (similarities as % ints) |
-| `MDMMatchExclusions` | Stewardship “do not match” keys |
-| `MDMMatchingState` | Intermediate ID sets for waterfall / grouping |
-| `MDMMatchLinks` | Final country match graph |
-| `MDMComponentLabels` | Component labels per iteration |
+| `mdm_row_registry` | Stable `MDMRowId` IDENTITY keys per `CountryCode` + `OperatorConcatId`; golden id crosswalk (`SourceGoldenRecordId`, `MDMGoldenId`, `MDMGoldenIdSource`, `MDMGoldenIdAssignedDate`) |
+| `mdm_golden_id_sequence` | High-water mark for engine-minted golden ids (single global row) |
+| `mdm_golden_id_history` | Append-only old → new golden id remaps per run (`MERGE` / `SPLIT`) |
+| `mdm_rule_results` | Accepted match edges per rule stage (incl. `000_Source_GoldenRecordId`); dropped Informatica-group bridges in stage `999_Blocked_Source_GoldenRecordId_Merge` (`blocked_source_group_merge`) |
+| `mdm_rule_evaluations` | Fuzzy candidate evidence (similarities as % ints) |
+| `mdm_match_exclusions` | Stewardship “do not match” keys |
+| `mdm_matching_state` | Intermediate ID sets for waterfall / grouping |
+| `mdm_match_links` | Final country match graph |
+| `mdm_component_labels` | Component labels per iteration |
 | `operator_golden_changelog` | Append-only record-level trace of golden id changes per `OperatorConcatId` with previous/current matching data and `ChangeReason` |
 | `vw_informatica_undermatch` / `vw_informatica_overmatch` | Views comparing `engine_match_id` (our rules alone) against Informatica's `SourceGoldenRecordId` |
-| `MDMMatchedResults` | Output with `golden_id`, `golden_id_source`, `previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `final_match_rule`, flags |
+| `mdm_matched_results` | Output with `golden_id`, `golden_id_source`, `previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `final_match_rule`, flags |
 | `mdmenrichedoperators` | External enrichment (not created by setup SQL) |
 
 ### Where the data lives — `conf/storage.config`
@@ -187,20 +187,23 @@ Intended layout:
 
 ### `src/matching/` — match engine
 
-| Module | Responsibility |
-|--------|----------------|
-| `config.py` | Constants, `storage.config` loader (`load_storage_config`, `dataset_spec`, `dataset_table`), layered JSON loaders (`conf/base.json` + per-country override), `resolve_config` |
-| `io.py` | **The only place that reads or writes storage.** `read` / `read_spec` (delta/csv/parquet) and `read_source_population`; `require_dataset` / Delta requires; country-slice writes; stewardship materialization |
-| `expressions.py` | Spark column expressions: cleaning, similarity, rule conditions, link schema, timing |
-| `rules.py` | One rule → links: `run_exact_rule` (star edges, block caps), `run_fuzzy_rule` (blocking, scoring, evaluations) |
-| `graph.py` | `connected_components`; Informatica groups as hard links, direct/transitive bridge blocking, blocked-edge stewardship output |
-| `golden_ids.py` | Golden id continuity: candidate claim/choice, allocator, registry write-back, history, group-preservation validation |
-| `pipeline.py` | `run_country` / `run_all`, `run_match_waterfall`, registry MERGE, enrichment, standardization, exclusions, output |
-| `cli.py` | `mdm-match` console entry point (Databricks Python wheel task) |
+| Module | Step |
+|--------|------|
+| `config.py` | Config + `storage.config` loading; `resolve_config` |
+| `read.py` | 1. Load the operator + golden population, overlay enrichment |
+| `registry.py` | 2. MERGE into `mdm_row_registry`, attach `MDMRowId` |
+| `standardize.py` | 3. Derive the `c_*` match attributes; work out exclusions |
+| `rules.py` | 4. One rule → links: `run_exact_rule`, `run_fuzzy_rule` |
+| `graph.py` | 5. Connected components; Informatica group links and bridge blocking |
+| `golden_ids.py` | 6. Golden id assignment with Informatica continuity |
+| `write.py` | Every Delta write, always a country slice |
+| `helpers.py` | Shared column expressions: cleaning, similarity, filters, timing |
+| `match_pipeline.py` | Orchestration: `run_country` / `run_all`, the priority waterfall |
+| `cli.py` | `mdm-match` console entry point |
 
-Rules of thumb when adding code: source/Delta access goes in `io.py`, anything that returns
-a `Column` goes in `expressions.py`, label propagation goes in `graph.py`, and `pipeline.py`
-only orchestrates.
+Rules of thumb when adding code: reads go in `read.py` and writes in `write.py`, anything
+that returns a `Column` goes in `helpers.py`, label propagation goes in `graph.py`, and
+`match_pipeline.py` only orchestrates — it should read as the list of steps.
 
 ### `src/dq/` — data quality
 
@@ -249,7 +252,7 @@ before changing anything nearby.
 - Deployment is the wheel only. The old zip-bundle and `sys.path` bootstrapping are gone,
   along with `notebooks/00_path_setup.py`.
 - New: `operator_golden_changelog` (record-level golden id trace with cause),
-  `engine_match_id` on `MDMMatchedResults`, and the two Informatica comparison views.
+  `engine_match_id` on `mdm_matched_results`, and the two Informatica comparison views.
 - New: `tests/` + `notebooks/run_tests.py`, run on a cluster (`docs/TESTING.md`).
 
 ### Open items
@@ -270,14 +273,14 @@ before changing anything nearby.
    a failure is more likely a wrong expectation about the MY rules (blocking keys, soundex)
    than an engine defect.
 4. **No run has been executed against real data since the restructure.** Run MY end to end
-   and diff `MDMMatchedResults` against a pre-change run before trusting it.
+   and diff `mdm_matched_results` against a pre-change run before trusting it.
 
 ## What is NOT built yet
 
 - Merge / survivorship of golden attributes
 - Incremental / CDC match
 - Stewardship UI
-- Match history beyond current Delta tables (golden id remaps are in `MDMGoldenIdHistory`)
+- Match history beyond current Delta tables (golden id remaps are in `mdm_golden_id_history`)
 - Any supported local workflow — the engine, the tests and the deployment are all
   Databricks-only by design
 

@@ -26,7 +26,7 @@ STORAGE_SOURCES_KEY = "sources"
 STORAGE_TABLES_KEY = "tables"
 
 ROW_REGISTRY_KEY_COLUMN = "OperatorConcatId"
-# Synthetic key for golden masters missing from the operator feed (see io.read_source_population).
+# Synthetic key for golden masters missing from the operator feed (see read.read_source_population).
 GOLDEN_MASTER_KEY_PREFIX = "GRID_"
 
 DEFAULT_EXACT_MAX_BLOCK_SIZE = 50000
@@ -198,7 +198,7 @@ def _source_spec(cfg: Dict[str, Any], key: str, default: Optional[Dict[str, Any]
 
 
 # storage.config dataset -> the config key the engine reads it under.
-# Specs (any format, read through io.read); the two the base/country config may override.
+# Specs (any format, read through read.read); the two the base/country config may override.
 SOURCE_SPEC_KEYS = {"operator": "source", "golden": "golden_source"}
 # Delta tables the engine names directly in SQL / saveAsTable, so these need a table name.
 TABLE_NAME_KEYS = {
@@ -231,7 +231,7 @@ def dataset_table(cfg: Dict[str, Any], name: str) -> str:
     if not table:
         raise ValueError(
             f"Dataset '{name}' is configured as {spec.get('format')} at '{spec.get('path')}', but this use "
-            "needs a table name. Point it at a Delta table in storage.config, or read it with io.read()."
+            "needs a table name. Point it at a Delta table in storage.config, or read it with read.read()."
         )
     return str(table)
 

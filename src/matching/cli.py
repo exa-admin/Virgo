@@ -41,7 +41,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Session first: importing the engine builds Spark Columns, which needs a live session.
     spark = SparkSession.builder.getOrCreate()
 
-    from matching.pipeline import run_all, run_country
+    from matching.match_pipeline import run_all, run_country
 
     if args.all:
         run_all(spark)

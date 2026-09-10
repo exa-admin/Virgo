@@ -11,7 +11,7 @@ stewardship tables to Delta Lake.
 Source → (optional enrichment) → Row registry → Standardize → Exclusions
   → Exact/Fuzzy waterfall → + Informatica group links (hard) → Match links
   → Connected components (→ drop Informatica-group bridges)
-  → Golden IDs (Informatica id > prior engine id > mint ≥ 1e8) → MDMMatchedResults
+  → Golden IDs (Informatica id > prior engine id > mint ≥ 1e8) → mdm_matched_results
 ```
 
 Details and a flowchart: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -66,12 +66,14 @@ entry point: mdm-match      parameters: ["--country", "MY"]   (or ["--all"])
 | Module | Responsibility |
 |--------|----------------|
 | `config.py` | Load `base.json` + `countries/{CC}.json`, resolve table names |
-| `io.py` | Read the source population (delta/csv/parquet); write country Delta slices |
-| `expressions.py` | Spark column expressions: text cleaning, similarity, rule conditions |
+| `write.py` | Read the source population (delta/csv/parquet); write country Delta slices |
+| `helpers.py` | Spark column expressions: text cleaning, similarity, filters |
 | `rules.py` | One rule → match links (exact star edges, fuzzy blocking + scoring) |
 | `graph.py` | Connected components; Informatica groups as hard links and bridge blocking |
 | `golden_ids.py` | Golden id selection, minting, registry write-back, history |
-| `pipeline.py` | `run_country` / `run_all` and the priority waterfall |
+| `match_pipeline.py` | `run_country` / `run_all` and the priority waterfall |
+| `read.py` / `write.py` | Loading the population; every Delta slice write |
+| `registry.py` / `standardize.py` | `MDMRowId` assignment; the `c_*` match attributes |
 | `cli.py` | `mdm-match` entry point for Databricks wheel tasks |
 
 ## Golden ID continuity (the Informatica migration)
@@ -85,28 +87,28 @@ get a new one.**
   matching (`preserve_source_golden_groups: true`).
 - A **new record** with no Informatica id that matches a group member **inherits the
   group's id**.
-- A **brand-new cluster** is minted a BIGINT from `MDMGoldenIdSequence`: always
+- A **brand-new cluster** is minted a BIGINT from `mdm_golden_id_sequence`: always
   `>= golden_id_floor` and above every id already known. The floor is **`100000000`**
   because Informatica is at ~1e7 and still grows for non-migrated countries. Keep it
   identical in every country config and only ever raise it — the run fails if Informatica
   reaches it.
 - **Two Informatica groups bridged by an engine rule**: with
   `allow_source_golden_group_merge: false` (the MY default) the bridging edges are dropped
-  and recorded in `MDMRuleResults` stage `999_Blocked_Source_GoldenRecordId_Merge`, so no
+  and recorded in `mdm_rule_results` stage `999_Blocked_Source_GoldenRecordId_Merge`, so no
   Informatica id ever changes. With `true`, one id survives and the other is logged as
-  `MERGE` in `MDMGoldenIdHistory`.
+  `MERGE` in `mdm_golden_id_history`.
 - Otherwise a cluster keeps the id the engine gave it on a previous run.
 - A known Informatica id is never overwritten with NULL once Informatica stops feeding a
   migrated country; a non-numeric `GoldenRecordId` fails the run rather than silently
   becoming NULL.
 - The run **fails before any write-back** if an Informatica id would end up split across
   components, on an engine-minted id, or — when merges are disallowed — changed at all.
-- Every old → new remap goes to `MDMGoldenIdHistory` (id level) and
+- Every old → new remap goes to `mdm_golden_id_history` (id level) and
   `operator_golden_changelog` (record level — see below).
 
 ## Tracing a golden id change
 
-`MDMMatchedResults` is overwritten each run, so the previous run's state would otherwise
+`mdm_matched_results` is overwritten each run, so the previous run's state would otherwise
 be lost. Before the overwrite, every `OperatorConcatId` whose golden id moved is appended
 to **`operator_golden_changelog`** with the previous run's matching data (rule, group size,
 name/address/city/zip), this run's, and a `ChangeReason`:
@@ -173,7 +175,7 @@ Source format is declarative, so moving from Delta views to files needs no code 
 
 - Databricks workspace with Delta Lake / Unity Catalog
 - Source views `sl_bdl_processed_cd_prod.cd.vw_ufsoperator` (operators to match) and
-  `…vw_ufsoperatorgoden` (golden masters)
+  `…vw_ufsoperatorgolden` (golden masters)
 - Optional enrichment table `…mdmenrichedoperators` when `EnrichDate` is true
 - PySpark and Delta come from the Databricks Runtime — the engine adds no dependencies
 
@@ -203,7 +205,7 @@ them up; nothing flows into the match automatically.
 
 `tests/` runs the **real** engine end to end on a Databricks cluster: each test builds a
 throwaway schema from the real `sql/setup_tables.sql`, loads a small dummy source
-population, runs `run_country` with the real MY rules, and asserts on `MDMMatchedResults`.
+population, runs `run_country` with the real MY rules, and asserts on `mdm_matched_results`.
 
 Open [`notebooks/run_tests.py`](notebooks/run_tests.py), set `test_schema` to a scratch
 schema, Run All. Or from any notebook:

@@ -1,7 +1,7 @@
 """End-to-end match scenarios against a local Spark + Delta warehouse.
 
 Each test loads a small source population, runs the real ``run_country`` with the real MY
-rules, and asserts on MDMMatchedResults. The two things that matter most are covered from
+rules, and asserts on mdm_matched_results. The two things that matter most are covered from
 both sides: records that **must** end up together, and records that **must not**.
 """
 from __future__ import annotations
@@ -149,7 +149,7 @@ def test_engine_rule_may_not_merge_two_informatica_groups(mdm):
     rows = mdm.rows_by_key()
     assert rows["OP1"].golden_id == 5000003
     assert rows["OP2"].golden_id == 5000004
-    blocked = mdm.table("MDMRuleResults").where("RuleStageName = '999_Blocked_Source_GoldenRecordId_Merge'")
+    blocked = mdm.table("mdm_rule_results").where("RuleStageName = '999_Blocked_Source_GoldenRecordId_Merge'")
     assert blocked.count() >= 1
 
 

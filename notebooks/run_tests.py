@@ -4,7 +4,7 @@
 # MAGIC
 # MAGIC Each test creates a throwaway schema from the real `sql/setup_tables.sql`, loads a
 # MAGIC small dummy source population, runs the real `run_country` with the real MY rules,
-# MAGIC asserts on `MDMMatchedResults`, then drops the schema.
+# MAGIC asserts on `mdm_matched_results`, then drops the schema.
 # MAGIC
 # MAGIC ## Steps
 # MAGIC

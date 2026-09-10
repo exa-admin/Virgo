@@ -23,27 +23,16 @@ if TYPE_CHECKING:
 
 # COMMAND ----------
 
-dbutils.widgets.text("country_code", "MY", "Country code")
-dbutils.widgets.text("country_name", "Malaysia", "Country name (for the Places query)")
-dbutils.widgets.text("limit_rows", "100", "Max operators to enrich")
-dbutils.widgets.text("max_results", "10", "Candidates per operator")
-dbutils.widgets.text("source_view", "", "Operator view (blank = conf/storage.config)")
-dbutils.widgets.text("output_path", "", "Output CSV path")
-
-country_code = dbutils.widgets.get("country_code").strip().upper()
-country_name = dbutils.widgets.get("country_name").strip()
-limit_rows = int(dbutils.widgets.get("limit_rows"))
-max_results = int(dbutils.widgets.get("max_results"))
-output_path = dbutils.widgets.get("output_path").strip()
-
-# The operator source is defined once, in conf/storage.config. The widget only exists to
-# point a one-off run at something else; it is not where the name lives.
 from matching.config import dataset_table, resolve_config
 
-source_view = dbutils.widgets.get("source_view").strip() or dataset_table(
-    resolve_config(country_code), "operator"
-)
-print(f"Operator source: {source_view}")
+country_code = "MY"
+country_name = "Malaysia"
+limit_rows = 100
+max_results = 10
+output_path = "/Volumes/catalog/schema/volume/address_candidates"
+
+source_view = dataset_table(resolve_config(country_code), "operator")
+print(source_view)
 
 # COMMAND ----------
 
@@ -146,9 +135,6 @@ display(
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
-
-if not output_path:
-    raise ValueError("Set the output_path widget, e.g. /Volumes/<cat>/<sch>/<vol>/operator_enriched_MY")
 
 df_out = spark.createDataFrame(
     df_enriched.drop(columns=[c for c in df_enriched.columns if c.startswith("original_")])
