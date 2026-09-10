@@ -17,9 +17,10 @@ already issued must never change.**
 | | |
 |---|---|
 | Engine | `src/matching/` — 9 modules; `pipeline.py` orchestrates, `rules.py` matches, `graph.py` groups, `golden_ids.py` assigns |
+| Storage | `src/matching/conf/storage.config` — **every** table, view and path, in one file |
 | Config | `src/matching/conf/base.json` + `conf/countries/{CC}.json` (inside the package, ships in the wheel) |
 | DDL | `sql/setup_tables.sql` |
-| Notebooks | `notebooks/run_match.py`, `run_tests.py`, `enrich_addresses.py` |
+| Notebooks | `notebooks/run_match.py` (wheel), `run_match_syspath.py` (from source, debugging), `run_tests.py`, `enrich_addresses.py` |
 | Tests | `tests/` — run on a cluster, see `docs/TESTING.md` |
 | Docs | `docs/ARCHITECTURE.md`, `DEPLOYMENT.md`, `TABLES.md`, `TESTING.md` |
 
@@ -34,6 +35,9 @@ already issued must never change.**
 - **Writes are country slices** (`replaceWhere` / `DELETE WHERE CountryCode`). Keep it that
   way so one country's run cannot damage another's.
 - Match rules live in **JSON config**, never hardcoded in Python.
+- **No storage name in Python.** Tables, views and paths live only in
+  `conf/storage.config`, and every read goes through `io.read(spark, cfg, "<dataset>")` —
+  that is what lets a source become Parquet without an engine change.
 - The engine-only components pass (`engine_match_id`) exists so the over/undermatch views
   have an honest basis for comparison. It looks redundant. It is not — see AGENTS.md.
 - After changing matching semantics, run `tests/` on a cluster. A failure there is a

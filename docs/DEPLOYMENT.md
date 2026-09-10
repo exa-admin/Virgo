@@ -8,18 +8,57 @@ no dependencies of its own, and the country configs ship inside it.
 # -> dist/mdm_engine-0.1.0-py3-none-any.whl
 ```
 
+## Where the data lives — `conf/storage.config`
+
+Every table, view and file path the engine touches is declared in one file,
+[`src/matching/conf/storage.config`](../src/matching/conf/storage.config). Nothing is
+hardcoded in Python, so this is the only file to edit when a deployment moves.
+
+```jsonc
+"schema": "pds_auroradsar_prod.schema_informatica",   // ${schema} below expands to this
+
+"sources": {                                          // read-only; any format
+  "operator": {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperator"},
+  "golden":   {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden"}
+},
+"tables": {                                           // engine-owned; read AND written
+  "row_registry": {"format": "delta", "table": "${schema}.MDMRowRegistry"}
+}
+```
+
+**Moving a source to files** is this edit and nothing else — no rebuild of engine logic,
+no code change:
+
+```json
+"operator": {"format": "parquet", "path": "/Volumes/cat/sch/vol/operator/"}
+```
+
+Every read in the engine goes through the single `io.read()` function, so the format is
+decided here and only here. `csv` and `parquet` take a `path` (plus optional `options`);
+`delta` takes a `table`. Datasets under `tables` must stay Delta tables — the engine
+writes them as country slices addressed by name.
+
+Overrides, highest first:
+
+| | |
+|---|---|
+| `target_schema` / `source` / `golden_source` in `conf/base.json` or a country file | Retarget one environment without touching `storage.config` (what the tests use) |
+| `MDM_STORAGE_CONFIG=/path/to/storage.config` | Replace just this file |
+| a `storage.config` inside `MDM_CONF_DIR` | Replace it along with the rest of `conf/` |
+| the copy packaged in the wheel | The fallback |
+
 ## One-time setup
 
 1. **Create the tables.** Run [`sql/setup_tables.sql`](../sql/setup_tables.sql) in a SQL
    editor or notebook cell. It already targets `pds_auroradsar_prod.schema_informatica`,
-   which is also the `target_schema` in `conf/base.json` — run it as-is. Change that name
-   in both places only if your workspace genuinely uses a different catalog/schema.
+   which is also the `schema` in `conf/storage.config` — run it as-is. Change that name in
+   both places only if your workspace genuinely uses a different catalog/schema.
 
 2. **Check the source views are readable:**
    - `sl_bdl_processed_cd_prod.cd.vw_ufsoperator` — operators to match
    - `sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden` — golden masters
 
-   Both are set in `conf/base.json` under `source` / `golden_source`.
+   Both are set in `conf/storage.config` under `sources`.
 
 ## Install the wheel
 
@@ -43,6 +82,24 @@ Add the enrichment dependencies only if you use `src/dq`:
 Import [`notebooks/run_match.py`](../notebooks/run_match.py) into your Workspace
 (Workspace → ⋮ → Import → File). Set the `countries` widget to `MY`, `MY,SG` or `ALL` and
 run all cells. It prints a per-country summary and shows the results.
+
+Its `%pip install` cell is **commented out on purpose** — the normal path is a cluster
+library, and a live `%pip` cell with a placeholder path would fail Run All. Uncomment it
+only if you are installing the wheel per-notebook, and set the Volume path when you do.
+The reporting cells take their table names from `storage.config`, so they follow the
+environment automatically.
+
+### Running from source instead (development only)
+
+[`notebooks/run_match_syspath.py`](../notebooks/run_match_syspath.py) does the same run,
+but imports the engine from a Workspace checkout of the repo via `sys.path` rather than
+from the wheel. Edit a file under `src/matching/`, re-run two cells, and the change is
+live — no rebuild, re-upload or cluster restart. Import the whole repo first (Git folder,
+or a zip via Workspace → ⋮ → Import), and open the notebook from inside that folder.
+
+Use it for debugging and for learning how the import path resolves. **Do not point a job
+at it** — a Workspace folder is mutable and unversioned at run time. Scheduled runs get
+the wheel.
 
 ### Any notebook cell
 
@@ -68,9 +125,9 @@ Create a job with a **Python wheel task**:
 
 ## Changing configs without rebuilding
 
-The wheel bundles `conf/`, which is what makes an install runnable as-is. To point the
-engine at configs you can edit in place, upload the folder (holding `base.json` and
-`countries/`) and set `MDM_CONF_DIR` **before importing**:
+The wheel bundles `conf/` (`storage.config`, `base.json`, `countries/`), which is what
+makes an install runnable as-is. To point the engine at configs you can edit in place,
+upload the folder and set `MDM_CONF_DIR` **before importing**:
 
 ```python
 import os
@@ -79,11 +136,20 @@ from matching import run_country
 run_country(spark, "MY")
 ```
 
-The run notebook has a `conf_dir` widget for the same thing, and the CLI has
-`--conf-dir`. Whatever you use, the bundled configs stay the fallback.
+To swap only the storage definitions — repoint a schema, or move a source to Parquet —
+override that one file instead:
 
-Rule changes are the usual reason to override; for anything the engine has to be taught,
-rebuild the wheel.
+```python
+import os
+os.environ["MDM_STORAGE_CONFIG"] = "/Volumes/<cat>/<sch>/<vol>/storage.config"
+```
+
+The run notebook has a `conf_dir` widget for the folder, and the CLI has `--conf-dir`.
+Whatever you use, the bundled configs stay the fallback — a folder holding only
+`base.json` still gets the packaged `storage.config`.
+
+Rule and storage changes are the usual reasons to override; for anything the engine has to
+be taught (a new format, say), rebuild the wheel.
 
 ## Adding a country
 

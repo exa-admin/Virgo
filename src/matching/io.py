@@ -1,23 +1,26 @@
-"""Reading the source population and writing Delta slices.
+"""Reading datasets and writing Delta slices.
 
-Source reading is isolated here so a deployment can swap Delta tables for CSV/Parquet
-files without touching engine code. Each spec in the config is declarative::
+**Every read in the engine goes through :func:`read`.** Nothing else calls
+``spark.table`` / ``spark.read``, so switching a dataset from a Delta table to Parquet or
+CSV files is a ``conf/storage.config`` edit and nothing more — the engine never learns
+where its data lives. Specs are declarative::
 
     {"format": "delta",   "table": "catalog.schema.view"}
     {"format": "csv",     "path": "/Volumes/.../operator/", "options": {"header": "true"}}
     {"format": "parquet", "path": "/Volumes/.../operator/"}
 
-Every write is a country-scoped ``replaceWhere`` slice, so re-running one country never
-touches another.
+Writes are the exception: they are country-scoped Delta ``replaceWhere`` slices addressed
+by table name, so a re-run of one country never touches another. A dataset the engine
+writes therefore has to stay a Delta table.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
-from matching.config import GOLDEN_MASTER_KEY_PREFIX
+from matching.config import GOLDEN_MASTER_KEY_PREFIX, dataset_spec
 from matching.expressions import collect_required_columns, score_to_percentage, sql_literal
 
 SUPPORTED_FORMATS = {"delta", "csv", "parquet"}
@@ -31,12 +34,16 @@ GOLDEN_REQUIRED_COLUMNS = ["CountryCode", "GoldenRecordId"]
 # --------------------------------------------------------------------------- reading
 
 
-def _read_spec(spark: SparkSession, spec: Dict[str, Any], label: str) -> DataFrame:
+def read_spec(spark: SparkSession, spec: Dict[str, Any], label: str) -> DataFrame:
+    """Load one declarative storage spec. The only place the engine touches a Spark reader.
+
+    Teach the engine a new storage format here and every dataset can use it.
+    """
     if not spec:
-        raise ValueError(f"{label}: source spec is empty")
+        raise ValueError(f"{label}: storage spec is empty")
     fmt = str(spec.get("format", "delta")).lower()
     if fmt not in SUPPORTED_FORMATS:
-        raise ValueError(f"{label}: unsupported source format '{fmt}' (use one of {sorted(SUPPORTED_FORMATS)})")
+        raise ValueError(f"{label}: unsupported storage format '{fmt}' (use one of {sorted(SUPPORTED_FORMATS)})")
 
     table, path = spec.get("table"), spec.get("path")
     if fmt == "delta" and table:
@@ -51,6 +58,21 @@ def _read_spec(spark: SparkSession, spec: Dict[str, Any], label: str) -> DataFra
     for key, value in dict(spec.get("options", {})).items():
         reader = reader.option(key, value)
     return reader.load(path)
+
+
+def read(spark: SparkSession, cfg: Dict[str, Any], dataset: str) -> DataFrame:
+    """Read a dataset by its ``storage.config`` name — the engine's only read path.
+
+    ``io.read(spark, cfg, "row_registry")`` rather than ``spark.table(...)``: the name
+    stays the same when the underlying store changes from a table to files.
+    """
+    return read_spec(spark, dataset_spec(cfg, dataset), dataset)
+
+
+def describe(cfg: Dict[str, Any], dataset: str) -> str:
+    """Human-readable location of a dataset, for error messages and run logs."""
+    spec = dataset_spec(cfg, dataset)
+    return str(spec.get("table") or f"{spec.get('format')}:{spec.get('path')}")
 
 
 def _validate_columns(df: DataFrame, cfg: Dict[str, Any], label: str, required: List[str]) -> None:
@@ -81,15 +103,15 @@ def read_source_population(spark: SparkSession, cfg: Dict[str, Any]) -> DataFram
     the current operator slice. Backfilled rows get a deterministic synthetic key
     (``GRID_<GoldenRecordId>``) and so stay stable across runs.
     """
-    operator = _read_spec(spark, cfg["source"], "operator source")
-    _validate_columns(operator, cfg, "operator source", OPERATOR_REQUIRED_COLUMNS)
+    operator = read(spark, cfg, "operator")
+    _validate_columns(operator, cfg, f"operator source ({describe(cfg, 'operator')})", OPERATOR_REQUIRED_COLUMNS)
     operator = operator.filter(cfg["filter_condition"])
 
     if not cfg.get("golden_source"):
         return operator
 
-    golden = _read_spec(spark, cfg["golden_source"], "golden source")
-    _validate_columns(golden, cfg, "golden source", GOLDEN_REQUIRED_COLUMNS)
+    golden = read(spark, cfg, "golden")
+    _validate_columns(golden, cfg, f"golden source ({describe(cfg, 'golden')})", GOLDEN_REQUIRED_COLUMNS)
     golden = golden.filter(cfg["filter_condition"])
 
     known_ids = (
@@ -137,6 +159,37 @@ def require_tables(spark: SparkSession, tables: Dict[str, List[str]]) -> None:
     for table_name, columns in tables.items():
         require_table(spark, table_name)
         require_columns(spark, table_name, columns)
+
+
+def require_dataset(
+    spark: SparkSession,
+    cfg: Dict[str, Any],
+    dataset: str,
+    required_columns: Optional[List[str]] = None,
+) -> DataFrame:
+    """Read a dataset by name and assert its columns, whatever it is stored as.
+
+    Returns the DataFrame so the caller reads once. Unlike :func:`require_table` this
+    works for file-backed datasets too, so a source can move to Parquet without the
+    validation needing a table name.
+    """
+    spec = dataset_spec(cfg, dataset)
+    location = describe(cfg, dataset)
+    table = spec.get("table")
+    if table and str(spec.get("format", "delta")).lower() == "delta" and not spark.catalog.tableExists(table):
+        raise ValueError(
+            f"Required table {table} (dataset '{dataset}') does not exist. Run sql/setup_tables.sql first."
+        )
+
+    df = read(spark, cfg, dataset)
+    missing = [c for c in (required_columns or []) if c not in set(df.columns)]
+    if missing:
+        raise ValueError(
+            f"Dataset '{dataset}' at {location} is missing required columns {missing}. "
+            "If it was created from an older setup SQL, re-run sql/setup_tables.sql; "
+            "if it is file-backed, check the path in storage.config."
+        )
+    return df
 
 
 def overwrite_slice(

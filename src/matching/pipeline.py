@@ -159,7 +159,7 @@ def _attach_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
 
     # Registry values win over the raw source, so SourceGoldenRecordId keeps the last known
     # Informatica id even when the source has since gone NULL for a migrated country.
-    registry = spark.table(registry_table).select(
+    registry = io.read(spark, cfg, "row_registry").select(
         "CountryCode",
         F.col("OperatorConcatId").alias(key_column),
         "MDMRowId",
@@ -182,20 +182,17 @@ def _attach_row_registry(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
 
 
 def _apply_enrichment(source: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
-    """Overlay reviewed address enrichment from mdmenrichedoperators, where present."""
+    """Overlay reviewed address enrichment from the 'enriched_operators' dataset, where present."""
     if not bool(cfg.get("EnrichDate", False)):
         return source
 
     spark = source.sparkSession
     key_column = cfg["rowRegistryKeyColumn"]
     source_columns = [source_column for source_column, _ in ENRICHMENT_COLUMN_MAPPINGS]
-    io.require_table(spark, cfg["enrichedOperatorsTable"])
-    io.require_columns(
-        spark, cfg["enrichedOperatorsTable"], [key_column, *[enriched for _, enriched in ENRICHMENT_COLUMN_MAPPINGS]]
+    enrichment = io.require_dataset(
+        spark, cfg, "enriched_operators", [key_column, *[enriched for _, enriched in ENRICHMENT_COLUMN_MAPPINGS]]
     )
     require_dataframe_columns(source, source_columns, "Source DataFrame for enrichment")
-
-    enrichment = spark.table(cfg["enrichedOperatorsTable"])
     if "match_found" in enrichment.columns:
         enrichment = enrichment.filter(
             F.lower(F.coalesce(F.col("match_found").cast("string"), F.lit("false"))) == F.lit("true")
@@ -270,7 +267,7 @@ def _excluded_record_ids(processed: DataFrame, cfg: Dict[str, Any]) -> DataFrame
     )
 
     exclusions = (
-        spark.table(cfg["matchExclusionsTable"])
+        io.read(spark, cfg, "match_exclusions")
         .select(
             F.trim(F.coalesce(F.col("CountryCode").cast("string"), F.lit(""))).alias("CountryCode"),
             F.trim(F.coalesce(F.col("OperatorConcatId").cast("string"), F.lit(""))).alias(key_column),
@@ -540,7 +537,7 @@ def run_country(spark: SparkSession, country_code: str, cfg: Optional[Dict[str, 
     print(f"Saved {country_code} matched output to {cfg['matchedResultsTable']}")
     # Return the persisted Delta slice, not the lazy plan, so display() does not silently
     # recompute the whole pipeline.
-    return spark.table(cfg["matchedResultsTable"]).where(where_country)
+    return io.read(spark, cfg, "matched_results").where(where_country)
 
 
 def _build_output(

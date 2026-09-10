@@ -31,6 +31,7 @@ mdm-match = "matching.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Ship the country configs inside the wheel so an install is runnable as-is.
-# MDM_CONF_DIR overrides them at runtime without a rebuild.
-matching = ["conf/*.json", "conf/countries/*.json"]
+# Ship the storage config and the country configs inside the wheel so an install is
+# runnable as-is. MDM_CONF_DIR (whole folder) or MDM_STORAGE_CONFIG (that one file)
+# overrides them at runtime without a rebuild.
+matching = ["conf/storage.config", "conf/*.json", "conf/countries/*.json"]

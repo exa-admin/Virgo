@@ -1,13 +1,11 @@
 {
-  "target_schema": "pds_auroradsar_prod.schema_informatica",
-  "source": {
-    "format": "delta",
-    "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperator"
-  },
-  "golden_source": {
-    "format": "delta",
-    "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden"
-  },
+  "_comment": [
+    "Cross-country matching BEHAVIOUR. Where the data lives is in conf/storage.config —",
+    "do not add table names or paths here.",
+    "Optional escape hatch: target_schema / source / golden_source may still be set here",
+    "(or in a country file) to override storage.config for one environment. The test",
+    "harness uses exactly that to point the engine at a scratch schema."
+  ],
   "EnrichDate": true,
   "priorityMatching": true,
   "golden_id_floor": 100000000,

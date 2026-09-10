@@ -30,6 +30,7 @@ from pyspark import StorageLevel
 from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
+from matching import io
 from matching.config import GOLDEN_ID_SOURCE_ENGINE, GOLDEN_ID_SOURCE_INFORMATICA
 from matching.expressions import is_empty, sql_literal
 
@@ -56,7 +57,7 @@ def collect_record_match_rules(match_links: DataFrame) -> DataFrame:
 def _registry_bounds(spark: SparkSession, cfg: Dict[str, Any]) -> Dict[str, Optional[int]]:
     """Highest golden ids the registry knows, across all countries (one global id space)."""
     row = (
-        spark.table(cfg["rowRegistryTable"])
+        io.read(spark, cfg, "row_registry")
         .agg(
             F.max(F.col("SourceGoldenRecordId").cast("long")).alias("max_source"),
             F.max(F.col("MDMGoldenId").cast("long")).alias("max_engine"),
@@ -77,7 +78,7 @@ def validate_golden_id_space(spark: SparkSession, cfg: Dict[str, Any]) -> None:
             "'golden_id_floor' in the country config (and keep it identical for all countries)."
         )
 
-    registry = spark.table(cfg["rowRegistryTable"])
+    registry = io.read(spark, cfg, "row_registry")
     engine_ids = (
         registry.filter(F.col("MDMGoldenIdSource") == F.lit(GOLDEN_ID_SOURCE_ENGINE))
         .select(F.col("MDMGoldenId").cast("long").alias("golden_id"))
@@ -114,7 +115,7 @@ def _reserve_id_range(spark: SparkSession, cfg: Dict[str, Any], count: int) -> i
 
     def read_mark() -> Optional[int]:
         row = (
-            spark.table(sequence_table)
+            io.read(spark, cfg, "golden_id_sequence")
             .filter(F.col("SequenceName") == F.lit(sequence_name))
             .select(F.col("NextValue").cast("long").alias("NextValue"))
             .first()
@@ -402,7 +403,7 @@ def save_change_log(final_df: DataFrame, cfg: Dict[str, Any], country_code: str)
     key_column = cfg["rowRegistryKeyColumn"]
     previous_columns = ["golden_id", "golden_id_source", "SourceGoldenRecordId", "final_match_rule", "match_group_size"]
 
-    previous = spark.table(cfg["matchedResultsTable"]).where(f"CountryCode = '{sql_literal(country_code)}'")
+    previous = io.read(spark, cfg, "matched_results").where(f"CountryCode = '{sql_literal(country_code)}'")
     # MatchRunTimestamp only exists once this version has written the table at least once.
     previous_run = (
         F.col("MatchRunTimestamp") if "MatchRunTimestamp" in previous.columns else F.lit(None).cast("timestamp")

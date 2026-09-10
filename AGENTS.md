@@ -124,10 +124,29 @@ from matching import run_country, run_all, load_country_config, available_countr
 | `MDMMatchedResults` | Output with `golden_id`, `golden_id_source`, `previous_golden_id`, `golden_id_changed`, `golden_id_differs_from_source`, `final_match_rule`, flags |
 | `mdmenrichedoperators` | External enrichment (not created by setup SQL) |
 
-Defaults live in `matching.config.DEFAULT_TARGET_SCHEMA` = `pds_auroradsar_prod.schema_informatica`
-(override per env via `target_schema` in `conf/base.json`). Source views default to
-`sl_bdl_processed_cd_prod.cd.vw_ufsoperator` / `…vw_ufsoperatorgoden` (override via
-`source` / `golden_source` specs; each is `{format: delta|csv|parquet, table|path, options}`).
+### Where the data lives — `conf/storage.config`
+
+**Every table, view and file path the engine touches is declared in
+`src/matching/conf/storage.config`, and nowhere else.** No storage name is hardcoded in
+Python. The file has two groups:
+
+- `sources` — read-only inputs (`operator`, `golden`, `enriched_operators`, and the two
+  `informatica_*` comparison views). Any supported format.
+- `tables` — the Delta tables the engine reads *and* writes. These stay `delta` + `table`,
+  because the writes are `replaceWhere` / `DELETE WHERE CountryCode` by table name.
+
+Each entry is a spec — `{format: delta|csv|parquet, table|path, options}` — and `${schema}`
+expands to the file's `schema` value, so one edit repoints every engine table.
+
+**All reads go through `io.read(spark, cfg, "<dataset>")`.** Nothing else calls
+`spark.table` / `spark.read`. To move a source from a table to Parquet, edit
+`storage.config` — the engine does not change. New formats are taught to `io.read_spec`
+once and every dataset gains them.
+
+Overrides, highest first: `target_schema` / `source` / `golden_source` in `conf/base.json`
+or a country file → `MDM_STORAGE_CONFIG` (that one file) → `MDM_CONF_DIR`'s copy → the
+packaged copy. The first is how `tests/conftest.py` retargets everything at a scratch
+schema; the packaged fallback is why a conf dir holding only `base.json` still works.
 
 ## How to run (Databricks)
 
@@ -155,7 +174,8 @@ Configs ship **inside** the wheel at `src/matching/conf/`. `MDM_CONF_DIR` (or
 - Prefer **no GraphFrames / GraphX**.
 - Writes are **country-partitioned Delta slices** (`replaceWhere` / delete-by-country).
 - Match methods are Spark-native (exact keys, Levenshtein, token Jaccard, blocking).
-- Config is layered: `src/matching/conf/base.json` (cross-country defaults — source specs, `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, `target_schema`, …) merged with `src/matching/conf/countries/{CC}.json` (per-country settings: the **match rules** — `exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules` — plus any base overrides; country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}` country file inherits all base defaults (see `MY.json`). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded. `MDM_CONF_DIR` env var relocates `conf/` without rebuilding the wheel.
+- Storage names live **only** in `src/matching/conf/storage.config` (see above); never hardcode a table, view or path in Python, and read through `io.read`.
+- Config is layered: `src/matching/conf/base.json` (cross-country matching defaults — `EnrichDate`, `standardization`, `invalid_values`, `exclude_from_match_filters`, `golden_id_floor`, …) merged with `src/matching/conf/countries/{CC}.json` (per-country settings: the **match rules** — `exact_match_rules`, `default_fuzzy_blocking`, `fuzzy_match_rules` — plus any base overrides; country wins). `filter_condition` defaults to `CountryCode = '<CC>'`. An empty `{}` country file inherits all base defaults (see `MY.json`). Copy `conf/countries/template.json` when adding a country — that file is reference-only and is not loaded. `MDM_CONF_DIR` env var relocates `conf/` without rebuilding the wheel.
 
 ## Package map
 
@@ -169,8 +189,8 @@ Intended layout:
 
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | Constants, layered JSON loaders (`conf/base.json` + per-country override), `resolve_config` (table names) |
-| `io.py` | Source ingestion (delta/csv/parquet) via `read_source_population`; Delta requires / country-slice writes / stewardship materialization |
+| `config.py` | Constants, `storage.config` loader (`load_storage_config`, `dataset_spec`, `dataset_table`), layered JSON loaders (`conf/base.json` + per-country override), `resolve_config` |
+| `io.py` | **The only place that reads or writes storage.** `read` / `read_spec` (delta/csv/parquet) and `read_source_population`; `require_dataset` / Delta requires; country-slice writes; stewardship materialization |
 | `expressions.py` | Spark column expressions: cleaning, similarity, rule conditions, link schema, timing |
 | `rules.py` | One rule → links: `run_exact_rule` (star edges, block caps), `run_fuzzy_rule` (blocking, scoring, evaluations) |
 | `graph.py` | `connected_components`; Informatica groups as hard links, direct/transitive bridge blocking, blocked-edge stewardship output |
@@ -278,5 +298,8 @@ before changing anything nearby.
 - Table inventory (internal vs audit): `docs/TABLES.md`
 - Pipeline diagram: `docs/ARCHITECTURE.md`
 - DDL: `sql/setup_tables.sql`
-- Entry notebook: `notebooks/run_match.py`
+- Entry notebook: `notebooks/run_match.py` (imports the installed wheel — the deployed path)
+- Debug/learning notebook: `notebooks/run_match_syspath.py` (same run, but imports the engine
+  from `src/` in a Workspace checkout via `sys.path`; edit a file and re-run, no rebuild.
+  Development only — jobs use the wheel)
 - Deployment: `docs/DEPLOYMENT.md`

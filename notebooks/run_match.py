@@ -12,19 +12,27 @@
 # MAGIC Prerequisites, once per environment:
 # MAGIC 1. Run `sql/setup_tables.sql`.
 # MAGIC 2. Install `mdm_engine-<version>-py3-none-any.whl` as a **cluster or job library**
-# MAGIC    (Compute → Libraries → Install new → Python whl). Then skip the `%pip` cell below.
+# MAGIC    (Compute → Libraries → Install new → Python whl). The `%pip` cell below is
+# MAGIC    commented out for exactly this case — leave it alone unless you need it.
+# MAGIC
+# MAGIC Every table this notebook reads comes from `conf/storage.config`; nothing is
+# MAGIC hardcoded here, so pointing that file at another schema repoints the whole notebook.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Install the engine (only if it is not a cluster library)
+# MAGIC ## Install the engine — only if it is NOT already a cluster library
 # MAGIC
-# MAGIC Uncomment and set the path to your uploaded wheel. `%pip` has to be the whole cell,
+# MAGIC Left commented out on purpose, so **Run All** works out of the box on a cluster that
+# MAGIC already has the wheel installed.
+# MAGIC
+# MAGIC To use it: uncomment the line in the next cell (drop the leading `# `) and replace
+# MAGIC `<catalog>/<schema>/<volume>` with your Volume path. `%pip` must be the whole cell,
 # MAGIC so the path cannot come from a widget.
 
 # COMMAND ----------
 
-# MAGIC %pip install --force-reinstall /Volumes/<catalog>/<schema>/<volume>/mdm_engine-0.1.0-py3-none-any.whl
+# MAGIC # %pip install --force-reinstall /Volumes/<catalog>/<schema>/<volume>/mdm_engine-0.1.0-py3-none-any.whl
 
 # COMMAND ----------
 
@@ -51,12 +59,21 @@ if conf_dir:
     os.environ["MDM_CONF_DIR"] = conf_dir
 
 from matching import available_countries, run_country
+from matching.config import dataset_table, resolve_config
 
 requested = dbutils.widgets.get("countries").strip().upper()
 countries = available_countries() if requested == "ALL" else [c.strip() for c in requested.split(",") if c.strip()]
 
 print(f"Configured countries: {available_countries()}")
 print(f"Running: {countries}")
+
+# Table names for the reporting cells below come from conf/storage.config — never hardcode
+# them here, or this notebook silently reports on the wrong environment.
+storage = resolve_config(countries[0]) if countries else None
+CHANGELOG_TABLE = dataset_table(storage, "change_log") if storage else None
+UNDERMATCH_VIEW = dataset_table(storage, "informatica_undermatch") if storage else None
+OVERMATCH_VIEW = dataset_table(storage, "informatica_overmatch") if storage else None
+print(f"Target schema: {storage['target_schema'] if storage else '(none)'}")
 
 # COMMAND ----------
 
@@ -122,7 +139,7 @@ if results:
     display(
         spark.sql(f"""
             SELECT ChangeReason, COUNT(*) AS records, COUNT(DISTINCT OperatorConcatId) AS operators
-            FROM pds_auroradsar_prod.schema_informatica.operator_golden_changelog
+            FROM {CHANGELOG_TABLE}
             WHERE CountryCode IN ({country_list})
               AND RunTimestamp >= current_timestamp() - INTERVAL 1 DAY
             GROUP BY ChangeReason ORDER BY records DESC
@@ -145,7 +162,7 @@ if results:
     print("UNDERMATCH — we matched them, Informatica did not:")
     display(
         spark.sql(f"""
-            SELECT * FROM pds_auroradsar_prod.schema_informatica.vw_informatica_undermatch
+            SELECT * FROM {UNDERMATCH_VIEW}
             WHERE CountryCode IN ({country_list})
             ORDER BY engine_group_size DESC, engine_match_id
         """)
@@ -158,7 +175,7 @@ if results:
     print("OVERMATCH — Informatica matched them, our rules found no evidence:")
     display(
         spark.sql(f"""
-            SELECT * FROM pds_auroradsar_prod.schema_informatica.vw_informatica_overmatch
+            SELECT * FROM {OVERMATCH_VIEW}
             WHERE CountryCode IN ({country_list})
             ORDER BY informatica_group_size DESC, SourceGoldenRecordId
         """)

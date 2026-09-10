@@ -1,10 +1,16 @@
 """Config loading and runtime table names.
 
-Layered: ``conf/base.json`` (cross-country defaults) + ``conf/countries/{CC}.json``
-(that country's match rules and overrides; country wins).
+Two files, separate concerns:
 
-``conf/`` ships inside the wheel. Set ``MDM_CONF_DIR`` to load it from elsewhere
-(Workspace / Volume / DBFS) without rebuilding.
+* ``conf/storage.config`` — **where the data lives**: every source, table, view and file
+  path the engine touches. Nothing storage-related is hardcoded in Python; to move a
+  dataset from a Delta table to Parquet/CSV files, edit that file only.
+* ``conf/base.json`` + ``conf/countries/{CC}.json`` — **how matching behaves** (rules,
+  thresholds, exclusions). Layered, country wins.
+
+``conf/`` ships inside the wheel. ``MDM_CONF_DIR`` relocates the whole folder;
+``MDM_STORAGE_CONFIG`` points at ``storage.config`` alone. Either way the packaged copy
+is the fallback, so a partial override folder never loses the storage defaults.
 """
 from __future__ import annotations
 
@@ -13,9 +19,11 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-DEFAULT_TARGET_SCHEMA = "pds_auroradsar_prod.schema_informatica"
-DEFAULT_SOURCE = {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperator"}
-DEFAULT_GOLDEN_SOURCE = {"format": "delta", "table": "sl_bdl_processed_cd_prod.cd.vw_ufsoperatorgoden"}
+STORAGE_CONFIG_FILENAME = "storage.config"
+SCHEMA_PLACEHOLDER = "${schema}"
+# Datasets the engine only reads (any format) vs. the Delta tables it also writes.
+STORAGE_SOURCES_KEY = "sources"
+STORAGE_TABLES_KEY = "tables"
 
 ROW_REGISTRY_KEY_COLUMN = "OperatorConcatId"
 # Synthetic key for golden masters missing from the operator feed (see io.read_source_population).
@@ -61,6 +69,73 @@ def conf_dir() -> Path:
     """Root of the config tree: ``MDM_CONF_DIR`` if set, else the packaged ``conf/``."""
     override = os.environ.get("MDM_CONF_DIR")
     return Path(override).resolve() if override else Path(__file__).resolve().parent / "conf"
+
+
+def storage_config_path() -> Path:
+    """Where ``storage.config`` lives.
+
+    ``MDM_STORAGE_CONFIG`` (a file) wins, then a copy inside ``MDM_CONF_DIR``, then the
+    one packaged in the wheel. The fallback matters: an override folder holding only
+    ``base.json`` still gets the packaged storage defaults.
+    """
+    override = os.environ.get("MDM_STORAGE_CONFIG")
+    if override:
+        return Path(override).resolve()
+    candidate = conf_dir() / STORAGE_CONFIG_FILENAME
+    return candidate if candidate.is_file() else Path(__file__).resolve().parent / "conf" / STORAGE_CONFIG_FILENAME
+
+
+def _without_comments(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop ``_comment`` documentation keys so they never reach a dataset spec."""
+    return {key: value for key, value in node.items() if not key.startswith("_")}
+
+
+def _expand_spec(spec: Any, schema: str, name: str) -> Dict[str, Any]:
+    """One dataset spec with ``${schema}`` expanded. A bare string means a Delta table."""
+    if isinstance(spec, str):
+        spec = {"format": "delta", "table": spec}
+    if not isinstance(spec, dict):
+        raise ValueError(f"storage.config: dataset '{name}' must be an object or a table name, got {type(spec).__name__}")
+
+    resolved = dict(spec)
+    for key in ("table", "path"):
+        if isinstance(resolved.get(key), str):
+            resolved[key] = resolved[key].replace(SCHEMA_PLACEHOLDER, schema)
+    resolved.setdefault("format", "delta")
+    if not resolved.get("table") and not resolved.get("path"):
+        raise ValueError(f"storage.config: dataset '{name}' needs a 'table' (delta) or a 'path' (file formats)")
+    return resolved
+
+
+def load_storage_config(path: Optional[Path] = None, schema_override: Optional[str] = None) -> Dict[str, Any]:
+    """Parse ``storage.config`` into ``{"schema": str, "datasets": {name: spec}}``.
+
+    Every dataset is returned fully expanded, so callers never see ``${schema}``.
+    ``schema_override`` (the ``target_schema`` of a base/country config) replaces the
+    file's own schema before expansion, which is how the tests retarget every engine
+    table at a scratch schema in one move.
+    """
+    path = Path(path) if path is not None else storage_config_path()
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Storage config not found: {path}. It ships in the wheel at matching/conf/{STORAGE_CONFIG_FILENAME}; "
+            "set MDM_STORAGE_CONFIG or put a copy in MDM_CONF_DIR to override it."
+        )
+    raw = json.loads(path.read_text())
+    schema = str(schema_override or raw.get("schema") or "").strip()
+    if not schema:
+        raise ValueError(f"storage.config: 'schema' is required ({path})")
+
+    datasets, writable = {}, set()
+    for group in (STORAGE_SOURCES_KEY, STORAGE_TABLES_KEY):
+        for name, spec in _without_comments(dict(raw.get(group) or {})).items():
+            datasets[name] = _expand_spec(spec, schema, name)
+            if group == STORAGE_TABLES_KEY:
+                writable.add(name)
+    if not datasets:
+        raise ValueError(f"storage.config: no datasets defined under '{STORAGE_SOURCES_KEY}' / '{STORAGE_TABLES_KEY}' ({path})")
+
+    return {"schema": schema, "datasets": datasets, "writable": writable, "path": str(path)}
 
 
 def _is_country_file(path: Path) -> bool:
@@ -122,36 +197,94 @@ def _source_spec(cfg: Dict[str, Any], key: str, default: Optional[Dict[str, Any]
     return {"format": "delta", "table": spec} if isinstance(spec, str) else dict(spec)
 
 
+# storage.config dataset -> the config key the engine reads it under.
+# Specs (any format, read through io.read); the two the base/country config may override.
+SOURCE_SPEC_KEYS = {"operator": "source", "golden": "golden_source"}
+# Delta tables the engine names directly in SQL / saveAsTable, so these need a table name.
+TABLE_NAME_KEYS = {
+    "row_registry": "rowRegistryTable",
+    "golden_id_sequence": "goldenIdSequenceTable",
+    "golden_id_history": "goldenIdHistoryTable",
+    "change_log": "changeLogTable",
+    "rule_results": "ruleResultsTable",
+    "rule_evaluations": "ruleEvaluationsTable",
+    "match_exclusions": "matchExclusionsTable",
+    "matching_state": "matchingStateTable",
+    "match_links": "matchLinksTable",
+    "component_labels": "componentLabelsTable",
+    "matched_results": "matchedResultsTable",
+}
+
+
+def dataset_spec(cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """The storage spec for one dataset of a resolved config. Raises if it is not defined."""
+    datasets = (cfg.get("storage") or {}).get("datasets") or {}
+    if name not in datasets:
+        raise KeyError(f"Unknown dataset '{name}'. Defined in storage.config: {sorted(datasets)}")
+    return datasets[name]
+
+
+def dataset_table(cfg: Dict[str, Any], name: str) -> str:
+    """The table name of a dataset — for SQL and ``saveAsTable``, which cannot take a path."""
+    spec = dataset_spec(cfg, name)
+    table = spec.get("table")
+    if not table:
+        raise ValueError(
+            f"Dataset '{name}' is configured as {spec.get('format')} at '{spec.get('path')}', but this use "
+            "needs a table name. Point it at a Delta table in storage.config, or read it with io.read()."
+        )
+    return str(table)
+
+
 def resolve_config(country_code: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Effective config for a country: base defaults + country file (or ``cfg``) + table names.
+    """Effective config for a country: base defaults + country file (or ``cfg``) + storage.
 
     A caller-supplied ``cfg`` still gets base.json merged underneath it, so a partial
     override never loses the global settings.
+
+    Storage names all come from ``storage.config``. ``target_schema`` / ``source`` /
+    ``golden_source`` in base.json or a country file still override it, so an
+    environment can be retargeted without editing the storage file.
     """
     cfg = load_country_config(country_code) if cfg is None else _merge(_load_base(conf_dir()), cfg)
 
-    schema = cfg.get("target_schema", DEFAULT_TARGET_SCHEMA)
-    source = _source_spec(cfg, "source", cfg.get("source_table", DEFAULT_SOURCE))
+    storage = load_storage_config(schema_override=cfg.get("target_schema"))
+    schema = storage["schema"]
+    datasets = dict(storage["datasets"])
+
+    # A source/golden_source override in base.json or a country file wins over storage.config
+    # (source_table is the legacy spelling of source).
+    for dataset_name, config_key in SOURCE_SPEC_KEYS.items():
+        override = _source_spec(cfg, config_key, None)
+        if override is None and dataset_name == "operator":
+            override = _source_spec(cfg, "source_table", None)
+        if override is not None:
+            datasets[dataset_name] = override
+        elif cfg.get(config_key, "") is None:
+            # Explicit null disables the dataset (golden_source: null skips the backfill).
+            datasets.pop(dataset_name, None)
+
+    missing = [name for name in TABLE_NAME_KEYS if name not in datasets]
+    if missing:
+        raise ValueError(f"storage.config is missing required tables {missing} (see {storage['path']})")
+
+    resolved_storage = {**storage, "datasets": datasets}
+    storage_only = {"storage": resolved_storage}
+    table_names = {
+        config_key: dataset_table(storage_only, dataset_name)
+        for dataset_name, config_key in TABLE_NAME_KEYS.items()
+    }
+
     return {
         **cfg,
+        "storage": resolved_storage,
         "target_schema": schema,
-        "source": source,
-        "golden_source": _source_spec(cfg, "golden_source", DEFAULT_GOLDEN_SOURCE),
+        "source": datasets.get("operator"),
+        "golden_source": datasets.get("golden"),
         "filter_condition": cfg.get("filter_condition") or f"CountryCode = '{country_code.upper()}'",
-        "rowRegistryTable": f"{schema}.MDMRowRegistry",
         "rowRegistryKeyColumn": ROW_REGISTRY_KEY_COLUMN,
         "matchLinksTempView": f"tmp_match_links_{country_code.lower()}",
-        "ruleResultsTable": f"{schema}.MDMRuleResults",
-        "ruleEvaluationsTable": f"{schema}.MDMRuleEvaluations",
-        "matchExclusionsTable": f"{schema}.MDMMatchExclusions",
-        "enrichedOperatorsTable": f"{schema}.mdmenrichedoperators",
-        "matchingStateTable": f"{schema}.MDMMatchingState",
-        "matchLinksTable": f"{schema}.MDMMatchLinks",
-        "componentLabelsTable": f"{schema}.MDMComponentLabels",
-        "matchedResultsTable": f"{schema}.MDMMatchedResults",
-        "goldenIdHistoryTable": f"{schema}.MDMGoldenIdHistory",
-        "changeLogTable": f"{schema}.operator_golden_changelog",
-        "goldenIdSequenceTable": f"{schema}.MDMGoldenIdSequence",
+        **table_names,
         "exact_max_block_size": DEFAULT_EXACT_MAX_BLOCK_SIZE,
         "fuzzy_max_block_size": DEFAULT_FUZZY_MAX_BLOCK_SIZE,
         "golden_id_floor": int(cfg.get("golden_id_floor", DEFAULT_GOLDEN_ID_FLOOR)),

@@ -27,15 +27,23 @@ dbutils.widgets.text("country_code", "MY", "Country code")
 dbutils.widgets.text("country_name", "Malaysia", "Country name (for the Places query)")
 dbutils.widgets.text("limit_rows", "100", "Max operators to enrich")
 dbutils.widgets.text("max_results", "10", "Candidates per operator")
-dbutils.widgets.text("source_view", "sl_bdl_processed_cd_prod.cd.vw_ufsoperator", "Operator view")
+dbutils.widgets.text("source_view", "", "Operator view (blank = conf/storage.config)")
 dbutils.widgets.text("output_path", "", "Output CSV path")
 
 country_code = dbutils.widgets.get("country_code").strip().upper()
 country_name = dbutils.widgets.get("country_name").strip()
 limit_rows = int(dbutils.widgets.get("limit_rows"))
 max_results = int(dbutils.widgets.get("max_results"))
-source_view = dbutils.widgets.get("source_view").strip()
 output_path = dbutils.widgets.get("output_path").strip()
+
+# The operator source is defined once, in conf/storage.config. The widget only exists to
+# point a one-off run at something else; it is not where the name lives.
+from matching.config import dataset_table, resolve_config
+
+source_view = dbutils.widgets.get("source_view").strip() or dataset_table(
+    resolve_config(country_code), "operator"
+)
+print(f"Operator source: {source_view}")
 
 # COMMAND ----------
 
