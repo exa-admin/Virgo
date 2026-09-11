@@ -195,6 +195,9 @@ class Harness:
 def mdm(spark, tmp_path):
     """A clean schema, tables built from the real DDL, and the real MY match rules."""
     spark.sql(f"DROP SCHEMA IF EXISTS {TEST_SCHEMA} CASCADE")
+    # Tables are dropped and rebuilt under the same names every test, so a snapshot cached
+    # from the previous test would be read against the new table and fail analysis.
+    spark.catalog.clearCache()
     spark.sql(f"CREATE SCHEMA {TEST_SCHEMA}")
     for statement in _ddl_statements():
         spark.sql(statement)

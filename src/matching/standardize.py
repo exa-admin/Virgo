@@ -34,9 +34,17 @@ def standardize_input(df: DataFrame, cfg: Dict[str, Any]) -> DataFrame:
         .withColumn("c_zip", zip_digits)
         .withColumn("c_zip_exact", zip_digits)
         .withColumn("c_name_prefix4", F.substring(F.col("c_name"), 1, 4))
-        # Soundex is empty for names that start with digits or non-Latin script; fall back
-        # to the prefix so those records still land in a block.
-        .withColumn("_soundex", F.soundex(F.col("c_name")))
+        # Spark's soundex returns the input unchanged when the first character is not an
+        # A-Z letter, so a non-Latin name became its own soundex key and could never share
+        # a block with anything. Gate it to ASCII and let everything else fall through to
+        # the prefix, which does group. Matters for MY, where Chinese names are common.
+        .withColumn(
+            "_soundex",
+            F.when(
+                (F.length(F.col("c_name")) > 0) & F.col("c_name").rlike(r"^[a-z0-9 ]+$"),
+                F.soundex(F.col("c_name")),
+            ),
+        )
         .withColumn(
             "c_name_soundex",
             F.when(F.col("_soundex").isNull() | (F.length(F.col("_soundex")) == 0), F.col("c_name_prefix4")).otherwise(

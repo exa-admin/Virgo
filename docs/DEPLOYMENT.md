@@ -189,5 +189,6 @@ Everything is a country slice, so re-running one country is safe and idempotent.
 | `Table … is missing required columns` | Tables were created from an older setup SQL — re-run it |
 | `Missing country config: …` | No `countries/{CC}.json`; copy `template.json` |
 | `did not converge within N iterations` | A match chain is longer than the budget — raise `components_max_iterations` |
+| A country run spends most of its time in the components stages | `component_label_detail` is `all`, writing every propagation iteration to Delta. Use the default `final` |
 | `Informatica golden groupings … would not be preserved` | A safety check fired; nothing was written. Inspect `mdm_match_links` / `mdm_component_labels` for the country |
 | `Informatica SourceGoldenRecordId values reach …` | Informatica has entered the engine id range — raise `golden_id_floor` everywhere |

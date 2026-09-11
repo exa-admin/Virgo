@@ -16,7 +16,8 @@
         }
       ],
       "match_exclusion_filter": [
-        "c_zip_exact IN ('00000', '99999')"
+        "c_zip_exact IN ('00000', '99999', '0000', '9999', '0', '1')",
+        "length(c_zip_exact) <> 5"
       ]
     },
     {
@@ -30,7 +31,8 @@
         }
       ],
       "match_exclusion_filter": [
-        "OTMText IN ('A++', 'DUMMY')"
+        "OTMText IN ('A++', 'DUMMY', '0')",
+        "SAPCustomerID IN ('null', '', '0', 'DUMMY')"
       ]
     },
     {
@@ -47,6 +49,10 @@
           "method": "exact_raw_not_empty",
           "min_length": 3
         }
+      ],
+      "match_exclusion_filter": [
+        "try_cast(trim(LatitudeText) AS DOUBLE) = 0.0",
+        "try_cast(trim(LongitudeText) AS DOUBLE) = 0.0"
       ]
     }
   ],
@@ -123,7 +129,9 @@
       ],
       "decision": "all",
       "match_exclusion_filter": [
-        "c_address = 'test'"
+        "lower(trim(c_address)) IN ('null', '-', '--', 'closed account')",
+        "lower(trim(c_city)) IN ('null', 'na', 'n/a', '-')",
+        "lower(trim(c_zip)) IN ('null', 'na', 'n/a', '0', '0000', '00000', '99999')"
       ]
     },
     {
@@ -155,7 +163,9 @@
       ],
       "decision": "all",
       "match_exclusion_filter": [
-        "c_address = 'test'"
+        "lower(trim(c_address)) IN ('null', '-', '--', 'closed account')",
+        "lower(trim(c_city)) IN ('null', 'na', 'n/a', '-')",
+        "lower(trim(c_zip)) IN ('null', 'na', 'n/a', '0', '0000', '00000', '99999')"
       ]
     },
     {
@@ -187,7 +197,9 @@
       ],
       "decision": "all",
       "match_exclusion_filter": [
-        "c_address = 'test'"
+        "lower(trim(c_address)) IN ('null', '-', '--', 'closed account')",
+        "lower(trim(c_city)) IN ('null', 'na', 'n/a', '-')",
+        "lower(trim(c_zip)) IN ('null', 'na', 'n/a', '0', '0000', '00000', '99999')"
       ]
     }
   ]

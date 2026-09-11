@@ -38,36 +38,43 @@ def test_fuzzy_matches_a_name_typo(mdm):
 def test_matches_chain_transitively(mdm):
     """A~B on name+zip and B~C on SAP id must land all three in one group."""
     mdm.run([
-        operator("OP1", "Chain One", ZipCode="58000", CityText="Cheras", StreetText="Jalan Chain", OTMText="STD"),
-        operator("OP2", "Chain One", ZipCode="58000", CityText="Cheras", StreetText="Jalan Chain", SAPCustomerId="SAP999", OTMText="STD"),
-        operator("OP3", "Totally Other Name", ZipCode="58999", CityText="Ampang", StreetText="Jalan Other", SAPCustomerId="SAP999", OTMText="STD"),
+        operator("OP1", "Chain One", ZipCode="58000", CityText="Cheras", StreetText="Jalan Chain"),
+        operator("OP2", "Chain One", ZipCode="58000", CityText="Cheras", StreetText="Jalan Chain", SAPCustomerId="SAP999"),
+        operator("OP3", "Totally Other Name", ZipCode="58999", CityText="Ampang", StreetText="Jalan Other", SAPCustomerId="SAP999"),
     ])
     assert mdm.grouped("OP1", "OP2", "OP3")
 
 
-# ----------------------------------------------------------- matches we must NOT make
+def test_blank_exclusion_column_does_not_remove_a_record_from_the_rule(mdm):
+    """MY's SAP rule excludes OTMText A++ / DUMMY. A *blank* OTMText is neither, so those
+    records must still be matched on their SAP id.
 
-
-def test_null_in_an_exclusion_column_silently_drops_the_record_from_that_rule(mdm):
-    """MY's SAP rule carries match_exclusion_filter ["OTMText IN ('A++','DUMMY')"].
-
-    That becomes ``NOT (OTMText IN (...))``, and in SQL a NULL OTMText makes the whole
-    predicate NULL, not TRUE — so records with no OTMText never reach the rule at all.
-    Pinned here because it looks exactly like a matching bug. If every operator should be
-    considered, the filter needs ``coalesce(OTMText, '')``.
+    ``helpers.apply_exclusion`` wraps every filter in ``coalesce(..., false)`` for exactly
+    this reason: a bare ``NOT (OTMText IN (...))`` is NULL rather than TRUE when OTMText is
+    NULL, and Spark drops a row whose filter is NULL just as it drops a FALSE one. That
+    silently removed every operator without an OTMText from the rule, which zeroed it out
+    on real data.
     """
     shared = dict(ZipCode="58200", CityText="Cheras", StreetText="Jalan Sap")
     mdm.run([
         operator("OP1", "Alpha Widgets", SAPCustomerId="SAP555", **shared),
         operator("OP2", "Beta Gadgets", SAPCustomerId="SAP555", **shared),
     ])
-    assert not mdm.grouped("OP1", "OP2"), "NULL OTMText no longer excludes rows — filter was fixed"
+    assert mdm.grouped("OP1", "OP2"), "a blank OTMText must not exclude the record"
+    assert "Exact_SAP_Customer_ID" in mdm.rows_by_key()["OP1"].final_match_rule
 
+
+def test_listed_exclusion_values_are_still_skipped(mdm):
+    """The exclusion itself must keep working: A++ and DUMMY are never matched on SAP id."""
+    shared = dict(ZipCode="58300", CityText="Cheras", StreetText="Jalan Excl")
     mdm.run([
-        operator("OP1", "Alpha Widgets", SAPCustomerId="SAP555", OTMText="STD", **shared),
-        operator("OP2", "Beta Gadgets", SAPCustomerId="SAP555", OTMText="STD", **shared),
+        operator("OP1", "Gamma Traders", SAPCustomerId="SAP777", OTMText="A++", **shared),
+        operator("OP2", "Delta Traders", SAPCustomerId="SAP777", OTMText="DUMMY", **shared),
     ])
-    assert mdm.grouped("OP1", "OP2")
+    assert not mdm.grouped("OP1", "OP2")
+
+
+# ----------------------------------------------------------- matches we must NOT make
 
 
 def test_different_businesses_are_not_matched(mdm):

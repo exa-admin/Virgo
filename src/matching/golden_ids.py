@@ -404,15 +404,19 @@ def save_change_log(final_df: DataFrame, cfg: Dict[str, Any], country_code: str)
     previous_columns = ["golden_id", "golden_id_source", "SourceGoldenRecordId", "final_match_rule", "match_group_size"]
 
     previous = read.read(spark, cfg, "matched_results").where(f"CountryCode = '{sql_literal(country_code)}'")
-    # MatchRunTimestamp only exists once this version has written the table at least once.
-    previous_run = (
-        F.col("MatchRunTimestamp") if "MatchRunTimestamp" in previous.columns else F.lit(None).cast("timestamp")
-    )
+
+    # The traced attributes and MatchRunTimestamp reach mdm_matched_results through
+    # mergeSchema on the first write, so they are absent from a table that only the setup
+    # DDL has created. Selecting them unconditionally fails analysis on the very first run
+    # of a country, before there is anything to compare against anyway.
+    def prior(column: str, data_type: str):
+        return F.col(column) if column in previous.columns else F.lit(None).cast(data_type)
+
     previous = previous.select(
         F.col(key_column).alias("_key"),
         *[F.col(c).alias(f"prev_{c}") for c in previous_columns],
-        *[F.col(source).alias(f"prev_{alias}") for source, alias in _TRACED_ATTRIBUTES],
-        previous_run.alias("prev_run"),
+        *[prior(source, "string").alias(f"prev_{alias}") for source, alias in _TRACED_ATTRIBUTES],
+        prior("MatchRunTimestamp", "timestamp").alias("prev_run"),
     ).dropDuplicates(["_key"])
 
     changed = final_df.filter(F.col("golden_id_changed")).join(

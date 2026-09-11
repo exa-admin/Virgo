@@ -190,11 +190,19 @@ def dedupe_match_links(match_links: DataFrame) -> DataFrame:
 
 
 def apply_exclusion(df: DataFrame, filters: Optional[Iterable[str]], label: str) -> DataFrame:
+    """Drop the records a rule's exclusion filters name, keeping everything else.
+
+    The ``coalesce(..., false)`` is load-bearing. A filter like ``OTMText IN ('A++')`` is
+    NULL — not FALSE — when OTMText is NULL, so a bare ``NOT (...)`` is NULL too, and Spark
+    discards a NULL-predicate row exactly as it discards a FALSE one. That silently dropped
+    every record with no OTMText from the rule. Exclusion must mean "this filter definitely
+    matched", so an unknown answer keeps the record.
+    """
     where_clause = sql_or(filters)
     if not where_clause:
         return df
     print(f"  -> Applying {label}: NOT ({where_clause})")
-    return df.filter(f"NOT ({where_clause})")
+    return df.filter(f"NOT (coalesce({where_clause}, false))")
 
 
 def collect_required_columns(cfg: Dict[str, Any]) -> List[str]:
@@ -257,12 +265,37 @@ def valid_value(column: F.Column, invalid_values: List[str], min_length: int = 1
 
 
 def levenshtein_similarity(left: F.Column, right: F.Column, invalid_values: List[str], min_length: int) -> F.Column:
-    """1 - (edit distance / longer length), or 0.0 when either side is invalid."""
-    max_len = F.greatest(F.length(left), F.length(right))
+    """1 - (edit distance / longer length), or 0.0 when either side is invalid.
+
+    Coalesced before length/levenshtein, and the divisor floored at 1, so the true branch
+    is safe to evaluate even for rows the WHEN guard rejects. Whole-stage codegen does not
+    always honour the guard's short-circuit, and a NULL from levenshtein unboxed into a
+    primitive is a NullPointerException rather than a NULL result.
+    """
+    left_s = F.coalesce(left.cast("string"), F.lit(""))
+    right_s = F.coalesce(right.cast("string"), F.lit(""))
+    longest = F.greatest(F.length(left_s), F.length(right_s))
     return F.when(
-        valid_value(left, invalid_values, min_length) & valid_value(right, invalid_values, min_length) & (max_len > 0),
-        F.lit(1.0) - (F.levenshtein(left, right).cast("double") / max_len.cast("double")),
+        valid_value(left, invalid_values, min_length) & valid_value(right, invalid_values, min_length) & (longest > 0),
+        F.lit(1.0) - (F.levenshtein(left_s, right_s).cast("double") / F.greatest(longest, F.lit(1)).cast("double")),
     ).otherwise(F.lit(0.0))
+
+
+def _jaccard_tokens(column: F.Column, min_token_length: int) -> F.Column:
+    """Distinct tokens of at least ``min_token_length``. Never NULL — empty array instead.
+
+    The higher-order ``filter`` is handed a non-null array and a predicate that cannot be
+    NULL. A NULL predicate element is the shape that makes codegen unbox a null Boolean,
+    which surfaces as a NullPointerException in the executor rather than a NULL row.
+    """
+    empty = F.array().cast("array<string>")
+    split = F.split(F.trim(F.coalesce(column.cast("string"), F.lit(""))), r"\s+")
+    distinct = F.coalesce(F.array_distinct(split), empty)
+    kept = F.filter(
+        distinct,
+        lambda token: token.isNotNull() & (F.length(F.coalesce(token, F.lit(""))) >= F.lit(int(min_token_length))),
+    )
+    return F.coalesce(kept, empty)
 
 
 def token_jaccard_similarity(
@@ -273,15 +306,14 @@ def token_jaccard_similarity(
     min_token_length: int,
 ) -> F.Column:
     """|shared tokens| / |all tokens|, ignoring tokens shorter than ``min_token_length``."""
-    def tokens(column: F.Column) -> F.Column:
-        split = F.array_distinct(F.split(F.trim(F.coalesce(column.cast("string"), F.lit(""))), r"\s+"))
-        return F.filter(split, lambda token: F.length(token) >= F.lit(min_token_length))
-
-    left_tokens, right_tokens = tokens(left), tokens(right)
-    union_size = F.size(F.array_union(left_tokens, right_tokens))
+    left_tokens = _jaccard_tokens(left, min_token_length)
+    right_tokens = _jaccard_tokens(right, min_token_length)
+    empty = F.array().cast("array<string>")
+    union_size = F.size(F.coalesce(F.array_union(left_tokens, right_tokens), empty))
+    intersection_size = F.size(F.coalesce(F.array_intersect(left_tokens, right_tokens), empty))
     return F.when(
         valid_value(left, invalid_values, min_length) & valid_value(right, invalid_values, min_length) & (union_size > 0),
-        F.size(F.array_intersect(left_tokens, right_tokens)).cast("double") / union_size.cast("double"),
+        intersection_size.cast("double") / union_size.cast("double"),
     ).otherwise(F.lit(0.0))
 
 

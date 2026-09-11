@@ -38,6 +38,7 @@ from matching.helpers import (
     ensure_columns,
     is_empty,
     matched_record_ids,
+    no_evidence,
     sql_literal,
     valid_value,
     timed,
@@ -111,22 +112,19 @@ def run_match_waterfall(df: DataFrame, country_code: str, cfg: Dict[str, Any]) -
 
         saved = write.save_rule_results(links, df, cfg, country_code, rule_type, stage_name, order)
         print(f"  -> Materialized {saved.count()} match links for {rule['rule_name']}")
-        per_rule_links.append(links)
+        # Use the checkpointed slice (no similarity columns), not the evidence-bearing plan.
+        per_rule_links.append(saved.select(*MATCH_LINK_BASE_COLUMNS, *no_evidence()))
 
         if priority_matching:
             already_matched = write.save_matching_state(
-                already_matched.unionByName(matched_record_ids(links)).dropDuplicates(["record_id"]),
+                already_matched.unionByName(matched_record_ids(saved)).dropDuplicates(["record_id"]),
                 cfg["matchingStateTable"],
                 country_code,
                 f"matched_record_ids_after_{stage_name}",
                 "MatchedRecordIds",
             )
 
-    all_links = dedupe_match_links(union_all(per_rule_links)).persist(StorageLevel.MEMORY_AND_DISK)
-    all_links.count()
-    for links in per_rule_links:
-        links.unpersist()
-    return all_links
+    return dedupe_match_links(union_all(per_rule_links))
 
 
 # ------------------------------------------------------------------------- run
@@ -160,7 +158,11 @@ def run_country(spark: SparkSession, country_code: str, cfg: Optional[Dict[str, 
     country_code = country_code.upper()
     cfg = resolve_config(country_code, cfg)
     where_country = f"CountryCode = '{sql_literal(country_code)}'"
-    print(f"Config for {country_code}: base.json + countries/{country_code}.json under {conf_dir()}")
+    # Printed so a run's output proves which build produced it — an old wheel left on a
+    # cluster is otherwise indistinguishable from a new one in the logs.
+    from matching import __version__
+
+    print(f"mdm-engine {__version__} | country {country_code} | config {conf_dir()}")
 
     write.require_tables(spark, _required_tables(cfg))
     for table in (cfg["ruleResultsTable"], cfg["ruleEvaluationsTable"], cfg["matchingStateTable"], cfg["componentLabelsTable"]):

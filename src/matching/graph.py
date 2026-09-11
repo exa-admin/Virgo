@@ -1,7 +1,8 @@
 """Connected components over the match graph, and Informatica group preservation.
 
 Both halves are min-label propagation, Spark-native (no UDFs, no GraphFrames), with each
-iteration checkpointed to mdm_component_labels so the query plan never grows unbounded.
+iteration checkpointed so the query plan never grows unbounded — locally by default, to
+mdm_component_labels when ``component_label_detail`` is "all".
 
 **Components** — every record starts labelled with its own id and repeatedly takes the
 smallest label among its neighbours. Labels only ever decrease, so "no label changed" is
@@ -53,6 +54,33 @@ def _bidirectional(links: DataFrame) -> DataFrame:
     )
 
 
+def _stage_labels(
+    labels: DataFrame,
+    cfg: Dict[str, Any],
+    country_code: str,
+    stage_name: str,
+    iteration: int,
+    final: bool = False,
+) -> DataFrame:
+    """Materialize one generation of labels and truncate the query plan behind it.
+
+    Truncation is the point: each iteration joins onto the previous one, so without it the
+    logical plan grows without bound and the driver's optimizer time explodes. Writing a
+    Delta slice does that, but it costs a full write + transaction + read-back of every
+    record, every iteration, in every propagation loop — and nothing ever reads the
+    intermediates. A local checkpoint truncates the same way with no table I/O, so only the
+    final generation is persisted to mdm_component_labels.
+
+    Set ``component_label_detail = "all"`` to write every iteration again when debugging a
+    grouping; it is far slower on a large country.
+    """
+    if final or cfg.get("component_label_detail", "final") == "all":
+        return write.save_component_labels(
+            labels, cfg["componentLabelsTable"], country_code, stage_name, iteration
+        ).persist(StorageLevel.MEMORY_AND_DISK)
+    return labels.localCheckpoint(eager=True)
+
+
 def connected_components(
     country_code: str,
     record_ids: DataFrame,
@@ -67,34 +95,34 @@ def connected_components(
     mdm_component_labels checkpoints, so two passes in one run do not overwrite each other.
     """
     max_iterations = int(cfg["components_max_iterations"])
-    labels = write.save_component_labels(
+    labels = _stage_labels(
         record_ids.select("record_id", F.col("record_id").alias("golden_id")).dropDuplicates(["record_id"]),
-        cfg["componentLabelsTable"],
+        cfg,
         country_code,
         f"{stage_prefix}_initial",
         0,
-    ).persist(StorageLevel.MEMORY_AND_DISK)
+    )
 
     neighbours = _bidirectional(match_links).persist(StorageLevel.MEMORY_AND_DISK)
     if is_empty(neighbours):
         neighbours.unpersist()
-        return labels
+        return _stage_labels(labels, cfg, country_code, f"{stage_prefix}_final", 0, final=True)
 
     for iteration in range(1, max_iterations + 1):
         propagated = neighbours.join(
             labels.select(F.col("record_id").alias("neighbor_id"), "golden_id"), "neighbor_id", "inner"
         ).select("record_id", "golden_id")
 
-        next_labels = write.save_component_labels(
+        next_labels = _stage_labels(
             labels.select("record_id", "golden_id")
             .unionByName(propagated)
             .groupBy("record_id")
             .agg(F.min("golden_id").alias("golden_id")),
-            cfg["componentLabelsTable"],
+            cfg,
             country_code,
             f"{stage_prefix}_iter_{iteration:03d}",
             iteration,
-        ).persist(StorageLevel.MEMORY_AND_DISK)
+        )
 
         changed = not is_empty(
             labels.alias("old")
@@ -106,7 +134,7 @@ def connected_components(
         print(f"  -> {stage_prefix} iteration {iteration}, changed={changed}")
         if not changed:
             neighbours.unpersist()
-            return labels
+            return _stage_labels(labels, cfg, country_code, f"{stage_prefix}_final", iteration, final=True)
 
     neighbours.unpersist()
     labels.unpersist()
@@ -248,13 +276,13 @@ def resolve_transitive_bridges(
     seeds = conflicted.select("record_id").join(ids, "record_id", "left").select(
         "record_id", F.col("SourceGoldenRecordId").alias("seed")
     )
-    labels = write.save_component_labels(
+    labels = _stage_labels(
         seeds.select("record_id", F.col("seed").alias("golden_id")),
-        cfg["componentLabelsTable"],
+        cfg,
         country_code,
         "source_group_labels_initial",
         0,
-    ).persist(StorageLevel.MEMORY_AND_DISK)
+    )
 
     converged = False
     for iteration in range(1, max_iterations + 1):
@@ -269,15 +297,15 @@ def resolve_transitive_bridges(
             .groupBy("record_id")
             .agg(F.min("neighbor_label").alias("neighbor_label"))
         )
-        next_labels = write.save_component_labels(
+        next_labels = _stage_labels(
             labels.join(seeds, "record_id", "left")
             .join(neighbour_min, "record_id", "left")
             .select("record_id", F.coalesce(F.col("seed"), F.least(F.col("golden_id"), F.col("neighbor_label"))).alias("golden_id")),
-            cfg["componentLabelsTable"],
+            cfg,
             country_code,
             f"source_group_labels_iter_{iteration:03d}",
             iteration,
-        ).persist(StorageLevel.MEMORY_AND_DISK)
+        )
 
         changed = not is_empty(
             labels.alias("old")

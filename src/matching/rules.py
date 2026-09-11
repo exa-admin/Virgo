@@ -5,11 +5,15 @@ Both passes produce the same link shape (``expressions.MATCH_LINK_COLUMNS``):
 * **exact** — hash the rule's key columns, keep blocks of 2..max_block_size records, and
   emit star edges from the block's lowest record id. O(n) instead of O(n^2).
 * **fuzzy** — build candidate pairs from the rule's blocking keys, score them
-  (Levenshtein / token Jaccard / exact), and keep the pairs the conditions accept. Every
-  candidate pair and its evidence is written to mdm_rule_evaluations, matched or not.
+  (Levenshtein / token Jaccard / exact), and keep the pairs the conditions accept. The
+  accepted pairs and their evidence go to mdm_rule_evaluations; ``rule_evaluation_detail``
+  decides whether rejected candidates are written too (they are quadratic in block size,
+  so not by default).
 
-Both return a **persisted** DataFrame; the caller (``pipeline.run_match_waterfall``)
-unpersists it once the links have been merged.
+Both return a lazy DataFrame. The caller materializes it through ``save_rule_results``,
+which drops the similarity columns — the same shape as the working notebook. Do not
+``persist().count()`` the evidence-bearing plan: that HashAggregate is what whole-stage
+codegen NPEs on, and the notebook never runs it.
 
 ``subject_ids`` carries the priority waterfall: once set, a link is only emitted if at
 least one endpoint is still unmatched by a higher-priority rule, and the flags say which
@@ -19,7 +23,7 @@ from __future__ import annotations
 
 from functools import reduce
 from operator import and_
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pyspark import StorageLevel
 from pyspark.sql import DataFrame
@@ -122,9 +126,7 @@ def run_exact_rule(
                 *no_evidence(),
             )
         )
-        links = dedupe_match_links(_subject_flags(star_edges, subject_ids)).persist(StorageLevel.MEMORY_AND_DISK)
-        links.count()
-        return links
+        return dedupe_match_links(_subject_flags(star_edges, subject_ids))
 
 
 # ----------------------------------------------------------------------------- fuzzy
@@ -149,8 +151,15 @@ def _resolve_blocking(rule: Dict[str, Any], cfg: Dict[str, Any]) -> List[Dict[st
     return [by_name[name] for name in rule["blocking_names"]]
 
 
-def _candidate_pairs(df: DataFrame, rule: Dict[str, Any], cfg: Dict[str, Any], subject_ids: Optional[DataFrame]) -> DataFrame:
-    """(src, dst) pairs that share at least one blocking key, with the blocks that produced them."""
+def _candidate_pairs(
+    df: DataFrame, rule: Dict[str, Any], cfg: Dict[str, Any], subject_ids: Optional[DataFrame]
+) -> Tuple[DataFrame, DataFrame]:
+    """(src, dst) pairs that share at least one blocking key, plus the cached block rows.
+
+    The block cache stays live so the caller can score pairs while it is warm, then
+    unpersist it. Pairs themselves stay lazy — counting them here would split pair
+    generation from scoring into a slimmer whole-stage plan, which is the NPE shape.
+    """
     invalid_values = cfg.get("invalid_values", [])
     default_max_block_size = int(cfg.get("fuzzy_max_block_size", 500))
 
@@ -214,10 +223,8 @@ def _candidate_pairs(df: DataFrame, rule: Dict[str, Any], cfg: Dict[str, Any], s
             F.concat_ws(",", F.sort_array(F.collect_set("block_name"))).alias("block_name"),
             F.concat_ws(",", F.sort_array(F.collect_set("match_key"))).alias("match_key"),
         )
-    ).persist(StorageLevel.MEMORY_AND_DISK)
-    result.count()  # materialize while the blocks cache is still warm
-    blocks.unpersist()
-    return result
+    )
+    return result, blocks
 
 
 def _score_pairs(candidates: DataFrame, rule: Dict[str, Any], invalid_values: List[str]) -> DataFrame:
@@ -250,7 +257,9 @@ def _score_pairs(candidates: DataFrame, rule: Dict[str, Any], invalid_values: Li
     address_best = {
         "levenshtein_similarity": address_levenshtein,
         "token_jaccard": address_jaccard,
-        "levenshtein_or_token_jaccard": F.greatest(address_levenshtein, address_jaccard),
+        "levenshtein_or_token_jaccard": F.greatest(
+            F.coalesce(address_levenshtein, F.lit(0.0)), F.coalesce(address_jaccard, F.lit(0.0))
+        ),
     }.get(address_method, none_double)
 
     zip_spec = specs.get("c_zip")
@@ -305,7 +314,7 @@ def run_fuzzy_rule(
             StorageLevel.MEMORY_AND_DISK
         )
 
-        pairs = _candidate_pairs(population, rule, cfg, subject_ids)
+        pairs, blocks = _candidate_pairs(population, rule, cfg, subject_ids)
 
         condition_columns = sorted({spec["column"] for spec in rule.get("conditions", [])})
         trace_columns = sorted({key_column, "c_name", "c_address", "c_city", "c_state", "c_zip", *condition_columns})
@@ -318,55 +327,68 @@ def run_fuzzy_rule(
         scored = _subject_flags(_score_pairs(candidates, rule, invalid_values), subject_ids)
         accepted = scored.filter(rule_matches(rule, invalid_values))
 
-        write.save_rule_evaluations(
-            scored.join(
+        # This table used to take every candidate pair: ~11M rows x 34 columns per rule on
+        # MY, of evidence nothing reads back, built on a self-join of `scored` with a
+        # filtered copy of itself. Default to the accepted pairs — one row per link, and no
+        # self-join at all. "all" restores the old behaviour for threshold tuning; use it on
+        # a filtered slice, not a whole country.
+        detail = cfg.get("rule_evaluation_detail", "matched")
+        if detail == "all":
+            evaluated = scored.join(
                 accepted.select("src", "dst").dropDuplicates(["src", "dst"]).withColumn("_matched", F.lit(True)),
                 ["src", "dst"],
                 "left",
-            )
-            .withColumn("IsMatched", F.coalesce(F.col("_matched"), F.lit(False)))
-            .select(
-                "src",
-                "dst",
-                F.col(f"a.{key_column}").cast("string").alias("SrcOperatorConcatId"),
-                F.col(f"b.{key_column}").cast("string").alias("DstOperatorConcatId"),
-                F.col("a.c_name").cast("string").alias("SrcName"),
-                F.col("b.c_name").cast("string").alias("DstName"),
-                F.col("a.c_address").cast("string").alias("SrcAddress"),
-                F.col("b.c_address").cast("string").alias("DstAddress"),
-                F.col("a.c_city").cast("string").alias("SrcCity"),
-                F.col("b.c_city").cast("string").alias("DstCity"),
-                F.col("a.c_state").cast("string").alias("SrcState"),
-                F.col("b.c_state").cast("string").alias("DstState"),
-                F.col("a.c_zip").cast("string").alias("SrcZip"),
-                F.col("b.c_zip").cast("string").alias("DstZip"),
-                compared_values("a", condition_columns).alias("SrcComparedValues"),
-                compared_values("b", condition_columns).alias("DstComparedValues"),
-                *_rule_identity(rule, "fuzzy"),
-                "block_name",
-                "match_key",
-                "src_is_rule_subject",
-                "dst_is_rule_subject",
-                "NameLevenshteinSimilarity",
-                "AddressLevenshteinSimilarity",
-                "AddressTokenJaccardSimilarity",
-                "AddressBestSimilarity",
-                "CityLevenshteinSimilarity",
-                "StateLevenshteinSimilarity",
-                "ZipExactMatch",
-                "NameConditionPassed",
-                "AddressConditionPassed",
-                "CityConditionPassed",
-                "StateConditionPassed",
-                "ZipConditionPassed",
-                "IsMatched",
-            ),
-            cfg["ruleEvaluationsTable"],
-            country_code,
-            rule_stage_name,
-            rule_execution_order,
-        )
+            ).withColumn("IsMatched", F.coalesce(F.col("_matched"), F.lit(False)))
+        else:
+            evaluated = accepted.withColumn("IsMatched", F.lit(True))
 
+        if detail != "none":
+            write.save_rule_evaluations(
+                evaluated.select(
+                    "src",
+                    "dst",
+                    F.col(f"a.{key_column}").cast("string").alias("SrcOperatorConcatId"),
+                    F.col(f"b.{key_column}").cast("string").alias("DstOperatorConcatId"),
+                    F.col("a.c_name").cast("string").alias("SrcName"),
+                    F.col("b.c_name").cast("string").alias("DstName"),
+                    F.col("a.c_address").cast("string").alias("SrcAddress"),
+                    F.col("b.c_address").cast("string").alias("DstAddress"),
+                    F.col("a.c_city").cast("string").alias("SrcCity"),
+                    F.col("b.c_city").cast("string").alias("DstCity"),
+                    F.col("a.c_state").cast("string").alias("SrcState"),
+                    F.col("b.c_state").cast("string").alias("DstState"),
+                    F.col("a.c_zip").cast("string").alias("SrcZip"),
+                    F.col("b.c_zip").cast("string").alias("DstZip"),
+                    compared_values("a", condition_columns).alias("SrcComparedValues"),
+                    compared_values("b", condition_columns).alias("DstComparedValues"),
+                    *_rule_identity(rule, "fuzzy"),
+                    "block_name",
+                    "match_key",
+                    "src_is_rule_subject",
+                    "dst_is_rule_subject",
+                    "NameLevenshteinSimilarity",
+                    "AddressLevenshteinSimilarity",
+                    "AddressTokenJaccardSimilarity",
+                    "AddressBestSimilarity",
+                    "CityLevenshteinSimilarity",
+                    "StateLevenshteinSimilarity",
+                    "ZipExactMatch",
+                    "NameConditionPassed",
+                    "AddressConditionPassed",
+                    "CityConditionPassed",
+                    "StateConditionPassed",
+                    "ZipConditionPassed",
+                    "IsMatched",
+                ),
+                cfg["ruleEvaluationsTable"],
+                country_code,
+                rule_stage_name,
+                rule_execution_order,
+            )
+
+        # Filter already used the scores. Drop them before the aggregate so this plan
+        # cannot HashAggregate nullable doubles / ZipExactMatch — that persist().count()
+        # is what NPEd, and the notebook never does it (rule_results has no evidence).
         links = dedupe_match_links(
             accepted.select(
                 "src",
@@ -376,14 +398,9 @@ def run_fuzzy_rule(
                 "match_key",
                 "src_is_rule_subject",
                 "dst_is_rule_subject",
-                "NameLevenshteinSimilarity",
-                "AddressLevenshteinSimilarity",
-                "AddressTokenJaccardSimilarity",
-                "AddressBestSimilarity",
-                "ZipExactMatch",
+                *no_evidence(),
             )
-        ).persist(StorageLevel.MEMORY_AND_DISK)
-        links.count()
-        pairs.unpersist()
+        )
+        blocks.unpersist()
         population.unpersist()
         return links

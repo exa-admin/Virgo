@@ -33,6 +33,24 @@ DEFAULT_EXACT_MAX_BLOCK_SIZE = 50000
 DEFAULT_FUZZY_MAX_BLOCK_SIZE = 500
 DEFAULT_COMPONENTS_MAX_ITERATIONS = 30
 
+# component_label_detail — what lands in the component_labels dataset.
+#   "final" (default) — only the converged labels per propagation stage.
+#   "all"             — every iteration of every stage, as before. That is a full write +
+#                       read-back of every record per iteration, in each of the engine,
+#                       main and bridge-resolution loops; use it to debug a grouping on a
+#                       small country, not on a multi-million-record run.
+# rule_evaluation_detail — how much fuzzy candidate evidence to keep.
+#   "matched" (default) — only the pairs a rule accepted; one row per link.
+#   "all"               — every candidate the blocking produced, matched or not. Quadratic
+#                         in block size: ~11M rows per rule on MY, on a self-join of the
+#                         scored pairs with a filtered copy of themselves. Use it on a
+#                         filtered slice when tuning thresholds, not a whole country.
+#   "none"              — write nothing.
+DEFAULT_RULE_EVALUATION_DETAIL = "matched"
+RULE_EVALUATION_DETAIL_MODES = {"matched", "all", "none"}
+DEFAULT_COMPONENT_LABEL_DETAIL = "final"
+COMPONENT_LABEL_DETAIL_MODES = {"final", "all"}
+
 # Engine-minted golden ids are always >= this floor and above every id the registry knows,
 # keeping them disjoint from the range Informatica can still reach for countries it serves.
 # Must be identical in every country config and may only ever be raised.
@@ -236,6 +254,14 @@ def dataset_table(cfg: Dict[str, Any], name: str) -> str:
     return str(table)
 
 
+def _detail(cfg: Dict[str, Any], key: str, default: str, allowed: set) -> str:
+    """Validate a detail knob; a typo would otherwise silently change what is kept."""
+    value = str(cfg.get(key, default)).lower()
+    if value not in allowed:
+        raise ValueError(f"{key} must be one of {sorted(allowed)}, got {value!r}.")
+    return value
+
+
 def resolve_config(country_code: str, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Effective config for a country: base defaults + country file (or ``cfg``) + storage.
 
@@ -290,6 +316,12 @@ def resolve_config(country_code: str, cfg: Optional[Dict[str, Any]] = None) -> D
         "golden_id_floor": int(cfg.get("golden_id_floor", DEFAULT_GOLDEN_ID_FLOOR)),
         "golden_id_sequence_name": str(cfg.get("golden_id_sequence_name", DEFAULT_GOLDEN_ID_SEQUENCE_NAME)),
         "components_max_iterations": int(cfg.get("components_max_iterations", DEFAULT_COMPONENTS_MAX_ITERATIONS)),
+        "rule_evaluation_detail": _detail(
+            cfg, "rule_evaluation_detail", DEFAULT_RULE_EVALUATION_DETAIL, RULE_EVALUATION_DETAIL_MODES
+        ),
+        "component_label_detail": _detail(
+            cfg, "component_label_detail", DEFAULT_COMPONENT_LABEL_DETAIL, COMPONENT_LABEL_DETAIL_MODES
+        ),
         "preserve_source_golden_groups": bool(
             cfg.get("preserve_source_golden_groups", DEFAULT_PRESERVE_SOURCE_GOLDEN_GROUPS)
         ),

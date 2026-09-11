@@ -12,6 +12,8 @@
   "preserve_source_golden_groups": true,
   "allow_source_golden_group_merge": false,
   "components_max_iterations": 30,
+  "rule_evaluation_detail": "matched",
+  "component_label_detail": "final",
   "invalid_values": [
     "",
     "null",
@@ -23,7 +25,14 @@
     "000",
     "0000",
     "dummy",
-    "test"
+    "test",
+    "0.0",
+    "0.00",
+    "0.000",
+    "0.0000",
+    "0.0000000",
+    "-",
+    "--"
   ],
   "exclude_from_match_filters": [
     "lower(OperatorName) LIKE '%invalid%'",

@@ -290,7 +290,8 @@ COMMENT 'Country-scoped match link graph edges';
 
 -- -----------------------------------------------------------------------------
 -- mdm_component_labels — connected-component label iterations
--- LabelStageName: labels_initial / labels_iter_NNN (min-label propagation);
+-- LabelStageName: <stage>_final by default (component_label_detail = "final"); with
+--   "all", also <stage>_initial / <stage>_iter_NNN for every propagation iteration;
 --   source_group_labels_initial / source_group_labels_iter_NNN (seeded propagation of
 --   Informatica ids inside components that bridged several groups; golden_id = the
 --   Informatica id label, NULL until reached) and labels_source_groups_resolved
