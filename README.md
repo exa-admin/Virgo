@@ -21,7 +21,7 @@ Table inventory (internal vs audit): [docs/TABLES.md](docs/TABLES.md).
 ## Quick start
 
 ```bash
-./scripts/build_wheel.sh          # -> dist/mdm_engine-0.1.0-py3-none-any.whl
+./scripts/build_wheel.sh          # -> dist/mdm_engine-0.2.0-py3-none-any.whl
 ```
 
 1. Run [`sql/setup_tables.sql`](sql/setup_tables.sql) once per environment.

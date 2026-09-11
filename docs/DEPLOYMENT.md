@@ -5,7 +5,7 @@ no dependencies of its own, and the country configs ship inside it.
 
 ```bash
 ./scripts/build_wheel.sh
-# -> dist/mdm_engine-0.1.0-py3-none-any.whl
+# -> dist/mdm_engine-0.2.0-py3-none-any.whl
 ```
 
 ## Where the data lives — `conf/storage.config`
@@ -33,7 +33,7 @@ no code change:
 "operator": {"format": "parquet", "path": "/Volumes/cat/sch/vol/operator/"}
 ```
 
-Every read in the engine goes through the single `io.read()` function, so the format is
+Every read in the engine goes through the single `read.read()` function, so the format is
 decided here and only here. `csv` and `parquet` take a `path` (plus optional `options`);
 `delta` takes a `table`. Datasets under `tables` must stay Delta tables — the engine
 writes them as country slices addressed by name.
@@ -62,6 +62,10 @@ Overrides, highest first:
 
 ## Install the wheel
 
+> **Bump `version` in `pyproject.toml` for every build you deploy.** Databricks caches
+> cluster libraries by name+version, so reinstalling the same version is a no-op and the
+> cluster keeps running the old code.
+
 Upload `mdm_engine-<version>-py3-none-any.whl` to a UC Volume (Catalog → your volume →
 **Upload to this volume**), then either:
 
@@ -69,7 +73,7 @@ Upload `mdm_engine-<version>-py3-none-any.whl` to a UC Volume (Catalog → your 
   point at the Volume path. Every notebook and job on that cluster can then
   `from matching import run_country`.
 - **Job library** — attach it to the job's task instead, so the version is pinned per job.
-- **Notebook-scoped** — `%pip install /Volumes/<cat>/<sch>/<vol>/mdm_engine-0.1.0-py3-none-any.whl`
+- **Notebook-scoped** — `%pip install /Volumes/<cat>/<sch>/<vol>/mdm_engine-0.2.0-py3-none-any.whl`
   as the first cell. Good for trying a new build without touching the cluster.
 
 Add the enrichment dependencies only if you use `src/dq`:
@@ -80,14 +84,11 @@ Add the enrichment dependencies only if you use `src/dq`:
 ### Notebook
 
 Import [`notebooks/run_match.py`](../notebooks/run_match.py) into your Workspace
-(Workspace → ⋮ → Import → File). Set the `countries` widget to `MY`, `MY,SG` or `ALL` and
-run all cells. It prints a per-country summary and shows the results.
+(Workspace → ⋮ → Import → File). Set `COUNTRY` at the top and run all cells: it prints the
+summary, the golden id changelog, and the two Informatica comparison views. Table names
+come from `storage.config`, so the notebook follows whatever environment that names.
 
-Its `%pip install` cell is **commented out on purpose** — the normal path is a cluster
-library, and a live `%pip` cell with a placeholder path would fail Run All. Uncomment it
-only if you are installing the wheel per-notebook, and set the Volume path when you do.
-The reporting cells take their table names from `storage.config`, so they follow the
-environment automatically.
+For several countries use `run_all(spark)` rather than editing the notebook.
 
 ### Running from source instead (development only)
 
@@ -144,9 +145,9 @@ import os
 os.environ["MDM_STORAGE_CONFIG"] = "/Volumes/<cat>/<sch>/<vol>/storage.config"
 ```
 
-The run notebook has a `conf_dir` widget for the folder, and the CLI has `--conf-dir`.
-Whatever you use, the bundled configs stay the fallback — a folder holding only
-`base.json` still gets the packaged `storage.config`.
+The CLI takes `--conf-dir` for the same thing. Whatever you use, the bundled configs
+stay the fallback — a folder holding only `base.json` still gets the packaged
+`storage.config`.
 
 Rule and storage changes are the usual reasons to override; for anything the engine has to
 be taught (a new format, say), rebuild the wheel.
